@@ -124,6 +124,10 @@ def main():
     from config import parse_args
     opt = parse_args()
 
+    # vast.ai UDP 端口映射补丁（仅纯 webrtc P2P 需要；缺少 VAST_* 环境变量时自动跳过）
+    from utils import vast_ice_patch
+    vast_ice_patch.apply()
+
     # ─── 加载 avatar 插件（触发 @register 注册）──────────────────────
     _avatar_modules = {
         'musetalk':   'avatars.musetalk_avatar',

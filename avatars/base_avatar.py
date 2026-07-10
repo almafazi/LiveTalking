@@ -480,9 +480,12 @@ class BaseAvatar:
             self.asr.run_step()
 
             buffer_size = self.output.get_buffer_size() if hasattr(self.output, 'get_buffer_size') else 0
-            if buffer_size >= 5:
+            # 保留一个小的播放缓冲，但避免过长 sleep 增加端到端延迟
+            if buffer_size >= 8:
                 logger.debug('sleep qsize=%d', buffer_size)
-                time.sleep(0.04 * buffer_size * 0.8)
+                time.sleep(0.04)
+            elif buffer_size >= 5:
+                time.sleep(0.01)
         logger.info('baseavatar render thread stop')
 
         infer_quit_event.set()

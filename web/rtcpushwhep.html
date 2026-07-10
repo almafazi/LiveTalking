@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LiveTalking (FLV)</title>
+  <title>LiveTalking (WHEP low-latency)</title>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 800px; margin: 16px auto; padding: 0 12px; }
     h2 { margin: 0 0 12px; }
@@ -13,12 +13,14 @@
     button { padding: 8px 16px; margin: 4px 4px 4px 0; cursor: pointer; }
     #status { color: #0a7d00; margin: 8px 0; white-space: pre-wrap; }
     #err { color: #c00; margin: 4px 0; white-space: pre-wrap; }
+    .hint { color: #666; font-size: 13px; }
   </style>
 </head>
 
 <body>
-  <h2>LiveTalking — Digital Human</h2>
-  <p id="status">Loading player…</p>
+  <h2>LiveTalking — Digital Human (WHEP)</h2>
+  <p class="hint">Low-latency WebRTC-over-TCP. If the video never starts, use the FLV page (<a href="rtcpushapi.html">rtcpushapi.html</a>) instead.</p>
+  <p id="status">Idle.</p>
   <p id="err"></p>
 
   <video id="video_player" controls autoplay muted playsinline></video>
@@ -26,48 +28,36 @@
   <div>
     <textarea id="message">Hello, this is a test.</textarea>
     <div>
+      <button id="btn_play">Start / Reload</button>
       <button id="btn_send">Send</button>
-      <button id="btn_reload">Reload video</button>
     </div>
   </div>
 
-  <script src="mpegts-1.7.3.min.js"></script>
+  <script src="srs.sdk.js"></script>
   <script>
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
     const video = document.getElementById('video_player');
-    // Same-origin HTTP-FLV, proxied to SRS by the backend (/srs-live).
-    const flvUrl = window.location.origin + '/srs-live/live/livestream.flv';
-    let flvPlayer = null;
+    // Same-origin WHEP signaling, proxied to SRS by the backend (/srs-whep).
+    const whepUrl = window.location.origin + '/srs-whep/rtc/v1/whep/?app=live&stream=livestream';
+    let sdk = null;
 
     function setStatus(msg) { statusEl.textContent = msg; }
     function setError(msg) { errEl.textContent = msg || ''; }
 
-    function loadVideo() {
+    function startPlay() {
       setError('');
-      if (flvPlayer) {
-        try { flvPlayer.destroy(); } catch (e) {}
-        flvPlayer = null;
-      }
-      if (!window.mpegts || !mpegts.getFeatureList().mseLivePlayback) {
-        setError('This browser does not support MSE live playback (mpegts.js).');
-        return;
-      }
-      setStatus('Connecting to stream…');
-      flvPlayer = mpegts.createPlayer(
-        { type: 'flv', isLive: true, url: flvUrl },
-        { enableStashBuffer: false, liveBufferLatencyChasing: true }
-      );
-      flvPlayer.attachMediaElement(video);
-      flvPlayer.load();
-      flvPlayer.on(mpegts.Events.ERROR, function (type, detail) {
-        setError('Playback error: ' + type + ' / ' + detail);
+      if (sdk) { try { sdk.close(); } catch (e) {} sdk = null; }
+      setStatus('Negotiating WebRTC (TCP)…');
+      sdk = new SrsRtcWhipWhepAsync();
+      video.srcObject = sdk.stream;
+      sdk.play(whepUrl).then(function () {
+        setStatus('Streaming (WebRTC).');
+      }).catch(function (reason) {
+        setError('WHEP play failed: ' + (reason && reason.responseText ? reason.responseText : reason));
+        try { sdk.close(); } catch (e) {}
+        sdk = null;
       });
-      flvPlayer.on(mpegts.Events.MEDIA_INFO, function () {
-        setStatus('Streaming.');
-      });
-      const p = flvPlayer.play();
-      if (p && p.catch) { p.catch(function (e) { setError('Autoplay blocked: ' + e); }); }
     }
 
     function sendText() {
@@ -79,14 +69,12 @@
         body: JSON.stringify({ text: text, type: 'echo', sessionid: '0' }),
       }).then(function () {
         document.getElementById('message').value = '';
-      }).catch(function (e) {
-        setError('Send failed: ' + e);
-      });
+      }).catch(function (e) { setError('Send failed: ' + e); });
     }
 
+    document.getElementById('btn_play').addEventListener('click', startPlay);
     document.getElementById('btn_send').addEventListener('click', sendText);
-    document.getElementById('btn_reload').addEventListener('click', loadVideo);
-    window.addEventListener('load', loadVideo);
+    window.addEventListener('load', startPlay);
   </script>
 </body>
 

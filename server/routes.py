@@ -3,7 +3,9 @@
 ###############################################################################
 
 import json
+import os
 import asyncio
+import aiohttp
 from aiohttp import web
 
 from utils.logger import logger
@@ -217,5 +219,80 @@ def setup_routes(app):
 
     # 注册 avatar 生成相关的路由
     setup_avatar_routes(app)
+
+    # ── SRS HTTP-FLV 同源代理 ──────────────────────────────────────────────
+    # 浏览器通过同源 /srs-live/... 播放 SRS 的 HTTP-FLV（走 TCP），
+    # 适配 vast.ai 等只暴露少量 TCP 端口、UDP 不可靠的环境。
+    srs_http_port = int(os.environ.get("SRS_HTTP_PORT", "8088"))
+
+    async def srs_flv_proxy(request):
+        path = request.match_info.get("path", "")
+        url = f"http://127.0.0.1:{srs_http_port}/{path}"
+        if request.query_string:
+            url = f"{url}?{request.query_string}"
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=5)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as resp:
+                    if resp.status >= 400:
+                        return web.Response(status=resp.status, body=await resp.read())
+                    out = web.StreamResponse(
+                        status=200,
+                        headers={
+                            "Content-Type": resp.headers.get("Content-Type", "video/x-flv"),
+                            "Cache-Control": "no-cache, no-store",
+                            "Access-Control-Allow-Origin": "*",
+                        },
+                    )
+                    await out.prepare(request)
+                    try:
+                        async for chunk in resp.content.iter_chunked(64 * 1024):
+                            await out.write(chunk)
+                    except (ConnectionResetError, asyncio.CancelledError):
+                        pass  # 客户端断开，正常结束
+                    return out
+        except aiohttp.ClientError as e:
+            logger.error("FLV proxy connect failed: %s", e)
+            return web.Response(status=502, text=f"SRS FLV unavailable: {e}")
+
+    app.router.add_get("/srs-live/{path:.*}", srs_flv_proxy)
+
+    # ── SRS WHEP 同源信令代理（低延迟 WebRTC-over-TCP 播放）─────────────────
+    # 浏览器 POST offer SDP 到同源 /srs-whep/...，由本服务转发给 SRS 的
+    # http_api（默认 10100）。可选注入 eip，让 SRS answer 里通告
+    # 公网 IP:外部TCP端口 的候选，使浏览器能走 vast 映射的 TCP 端口连上。
+    srs_api_port = int(os.environ.get("SRS_API_PORT", "10100"))
+    srs_rtc_eip = os.environ.get("SRS_RTC_EIP", "").strip()  # 形如 "1.2.3.4:34567"
+
+    async def srs_whep_proxy(request):
+        path = request.match_info.get("path", "")
+        url = f"http://127.0.0.1:{srs_api_port}/{path}"
+        query = request.query_string
+        if srs_rtc_eip:
+            query = f"{query}&eip={srs_rtc_eip}" if query else f"eip={srs_rtc_eip}"
+        if query:
+            url = f"{url}?{query}"
+        offer_sdp = await request.read()
+        timeout = aiohttp.ClientTimeout(total=15, sock_connect=5)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    url, data=offer_sdp,
+                    headers={"Content-Type": "application/sdp"},
+                ) as resp:
+                    body = await resp.read()
+                    return web.Response(
+                        status=resp.status,
+                        body=body,
+                        headers={
+                            "Content-Type": resp.headers.get("Content-Type", "application/sdp"),
+                            "Access-Control-Allow-Origin": "*",
+                        },
+                    )
+        except aiohttp.ClientError as e:
+            logger.error("WHEP proxy connect failed: %s", e)
+            return web.Response(status=502, text=f"SRS WHEP unavailable: {e}")
+
+    app.router.add_post("/srs-whep/{path:.*}", srs_whep_proxy)
 
     app.router.add_static('/', path='web')

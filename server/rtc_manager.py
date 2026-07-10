@@ -24,6 +24,24 @@ from utils.logger import logger
 from server.session_manager import session_manager
 from server.session_manager import MaxSessionError
 
+
+def _prefer_h264(pc: RTCPeerConnection) -> None:
+    """让所有 video transceiver 优先使用 H264（其次 VP8），便于 SRS remux / 浏览器兼容。"""
+    capabilities = RTCRtpSender.getCapabilities("video")
+    preferences = (
+        [c for c in capabilities.codecs if c.name == "H264"]
+        + [c for c in capabilities.codecs if c.name == "VP8"]
+        + [c for c in capabilities.codecs if c.name == "rtx"]
+    )
+    if not preferences:
+        return
+    for transceiver in pc.getTransceivers():
+        sender = getattr(transceiver, "sender", None)
+        track = getattr(sender, "track", None)
+        if track is not None and track.kind == "video":
+            transceiver.setCodecPreferences(preferences)
+
+
 class RTCManager:
     """
     WebRTC 连接管理器。
@@ -77,13 +95,8 @@ class RTCManager:
         pc.addTrack(player.audio)
         pc.addTrack(player.video)
 
-        # 设置编解码器偏好
-        capabilities = RTCRtpSender.getCapabilities("video")
-        preferences = list(filter(lambda x: x.name == "H264", capabilities.codecs))
-        preferences += list(filter(lambda x: x.name == "VP8", capabilities.codecs))
-        preferences += list(filter(lambda x: x.name == "rtx", capabilities.codecs))
-        transceiver = pc.getTransceivers()[1]
-        transceiver.setCodecPreferences(preferences)
+        # 设置编解码器偏好（H264 优先）
+        _prefer_h264(pc)
 
         await pc.setRemoteDescription(offer)
 
@@ -120,11 +133,31 @@ class RTCManager:
         pc.addTrack(player.audio)
         pc.addTrack(player.video)
 
+        # H264 优先，便于 SRS remux 成 FLV 给浏览器播放
+        _prefer_h264(pc)
+
         await pc.setLocalDescription(await pc.createOffer())
+        logger.info("rtcpush WHIP -> %s", push_url)
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(push_url, data=pc.localDescription.sdp) as response:
+            async with session.post(
+                push_url,
+                data=pc.localDescription.sdp,
+                headers={"Content-Type": "application/sdp"},
+            ) as response:
                 answer_sdp = await response.text()
+                if response.status >= 400:
+                    logger.error(
+                        "WHIP failed status=%s body=%s",
+                        response.status, answer_sdp[:500],
+                    )
+                    await pc.close()
+                    self.pcs.discard(pc)
+                    return
+                logger.info(
+                    "WHIP ok status=%s answer_len=%d",
+                    response.status, len(answer_sdp),
+                )
 
         await pc.setRemoteDescription(
             RTCSessionDescription(sdp=answer_sdp, type='answer')
