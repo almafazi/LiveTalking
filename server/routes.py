@@ -109,6 +109,32 @@ async def humanaudio(request):
         return json_error(str(e))
 
 
+async def elevenlabs_signed_url(request):
+    """获取 ElevenLabs ConvAI signed URL（API key 保留在服务端）"""
+    try:
+        api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+        agent_id = os.environ.get("ELEVENLABS_AGENT_ID", "")
+        if not api_key or not agent_id:
+            return json_error("Missing ELEVENLABS_API_KEY or ELEVENLABS_AGENT_ID")
+
+        base_url = os.environ.get(
+            "ELEVENLABS_BASE_URL", "https://api.elevenlabs.io/v1"
+        ).rstrip("/")
+        url = f"{base_url}/convai/conversation/get-signed-url?agent_id={agent_id}"
+        timeout = aiohttp.ClientTimeout(total=15, sock_connect=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers={"xi-api-key": api_key}) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    logger.error("ElevenLabs signed-url failed: %s %s", resp.status, text)
+                    return json_error(f"ElevenLabs error {resp.status}: {text}")
+                data = json.loads(text)
+        return web.json_response({"signedUrl": data.get("signed_url")})
+    except Exception as e:
+        logger.exception('elevenlabs_signed_url exception:')
+        return json_error(str(e))
+
+
 async def set_audiotype(request):
     """设置自定义状态（动作编排）"""
     try:
@@ -202,6 +228,7 @@ def setup_routes(app):
     app.router.add_post("/record", record)
     app.router.add_post("/interrupt_talk", interrupt_talk)
     app.router.add_post("/is_speaking", is_speaking)
+    app.router.add_get("/api/elevenlabs/signed-url", elevenlabs_signed_url)
     app.router.add_get("/api/admin/config", admin_config)
     app.router.add_get("/api/admin/sessions", admin_sessions)
 
