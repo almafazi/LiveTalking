@@ -165,15 +165,20 @@
     // ─────────────────────────────────────────────────────────────────────────
     // Forward agent audio / control to LiveTalking
     // ─────────────────────────────────────────────────────────────────────────
-    async function postHumanAudio(wavBlob) {
-      const fd = new FormData();
-      fd.append('sessionid', SESSIONID);
-      fd.append('file', wavBlob, 'agent.wav');
-      try {
-        await fetch('/humanaudio', { method: 'POST', body: fd });
-      } catch (e) {
-        setError('humanaudio failed: ' + e);
-      }
+    // Serialize uploads so streamed slices reach the server in order.
+    let humanAudioQueue = Promise.resolve();
+    function postHumanAudio(wavBlob) {
+      humanAudioQueue = humanAudioQueue.then(async () => {
+        const fd = new FormData();
+        fd.append('sessionid', SESSIONID);
+        fd.append('file', wavBlob, 'agent.wav');
+        try {
+          await fetch('/humanaudio', { method: 'POST', body: fd });
+        } catch (e) {
+          setError('humanaudio failed: ' + e);
+        }
+      });
+      return humanAudioQueue;
     }
 
     function interruptTalk() {
@@ -244,11 +249,11 @@
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Trimmed ElevenLabs ConvAI client — accumulates agent PCM per turn and
-    // forwards each finished turn to LiveTalking as a WAV. No local playback.
+    // Trimmed ElevenLabs ConvAI client — streams agent PCM to LiveTalking in
+    // small slices (low latency) as it arrives. No local playback.
     // ─────────────────────────────────────────────────────────────────────────
-    const SEGMENT_IDLE_END_MS = 2500;
-    const SEGMENT_END_PLAYBACK_MARGIN_MS = 1500;
+    const FLUSH_MS = 200;          // ship a slice once ~200ms of audio is buffered
+    const TAIL_IDLE_MS = 250;      // flush the sub-threshold tail promptly
     const MAX_PENDING_AUDIO_CHUNKS = 80;
 
     class ConvaiClient {
@@ -261,9 +266,8 @@
         this.formatOk = true;
         this.conversationId = null;
         this.pendingAudio = [];
-        this.turnChunks = null;        // array of Uint8Array (raw PCM16 bytes) or null
+        this.turnChunks = null;        // buffered Uint8Array PCM16 bytes (current slice) or null
         this.turnBytes = 0;
-        this.turnFirstAt = 0;
         this.idleTimer = null;
       }
 
@@ -345,24 +349,23 @@
       handleAudioEvent(audioEvent) {
         const b64 = audioEvent.audio_base_64;
         if (!b64 || !this.formatOk) return;
-        if (!this.turnChunks) { this.turnChunks = []; this.turnBytes = 0; this.turnFirstAt = Date.now(); }
+        if (!this.turnChunks) { this.turnChunks = []; this.turnBytes = 0; }
         const bytes = base64ToBytes(b64);
         this.turnChunks.push(bytes);
         this.turnBytes += bytes.byteLength;
-        this.armIdleTimer();
+        // Stream to LiveTalking as soon as ~FLUSH_MS of audio is buffered so the
+        // avatar starts speaking without waiting for the whole turn.
+        const flushBytes = Math.floor(this.sampleRate * 2 * (FLUSH_MS / 1000));
+        if (this.turnBytes >= flushBytes) this.flushTurn();
+        else this.armTailTimer();
       }
 
-      armIdleTimer() {
+      armTailTimer() {
         if (this.idleTimer) clearTimeout(this.idleTimer);
-        if (!this.turnChunks) return;
-        const receivedMs = (this.turnBytes / (this.sampleRate * 2)) * 1000;
-        const playedMs = Date.now() - this.turnFirstAt;
-        const remaining = Math.max(0, receivedMs - playedMs);
-        const delay = Math.max(SEGMENT_IDLE_END_MS, remaining + SEGMENT_END_PLAYBACK_MARGIN_MS);
-        this.idleTimer = setTimeout(() => { this.idleTimer = null; this.flushTurn(); }, delay);
+        this.idleTimer = setTimeout(() => { this.idleTimer = null; this.flushTurn(); }, TAIL_IDLE_MS);
       }
 
-      // Send the accumulated turn to LiveTalking as a WAV.
+      // Ship whatever PCM is currently buffered to LiveTalking as a WAV slice.
       flushTurn() {
         if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
         if (!this.turnChunks || this.turnBytes === 0) { this.turnChunks = null; this.turnBytes = 0; return; }
@@ -371,7 +374,7 @@
         postHumanAudio(pcm16ToWavBlob(pcm, this.sampleRate));
       }
 
-      // Drop the in-progress turn without sending (barge-in).
+      // Drop the buffered slice without sending (barge-in).
       discardTurn() {
         if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
         this.turnChunks = null; this.turnBytes = 0;
