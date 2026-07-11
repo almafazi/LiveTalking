@@ -74,6 +74,31 @@ class FaceParsing():
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ])
 
+    @staticmethod
+    def _create_mouth_mask(parsing):
+        """Build a feather-ready mask around the lips without replacing the jaw."""
+        lip_region = np.isin(parsing, [11, 12, 13]).astype(np.uint8)
+        points = cv2.findNonZero(lip_region)
+        if points is None:
+            return np.zeros_like(parsing, dtype=np.uint8)
+
+        x, y, width, height = cv2.boundingRect(points)
+        padding_x = max(20, width // 2)
+        padding_top = max(12, height)
+        # Leave more room below closed lips for generated open-mouth frames.
+        padding_bottom = max(30, height * 3)
+
+        left = max(0, x - padding_x)
+        top = max(0, y - padding_top)
+        right = min(parsing.shape[1] - 1, x + width + padding_x)
+        bottom = min(parsing.shape[0] - 1, y + height + padding_bottom)
+
+        mask = np.zeros_like(parsing, dtype=np.uint8)
+        center = ((left + right) // 2, (top + bottom) // 2)
+        axes = (max(1, (right - left) // 2), max(1, (bottom - top) // 2))
+        cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
+        return mask
+
     def __call__(self, image, size=(512, 512), mode="raw"):
         if isinstance(image, str):
             image = Image.open(image)
@@ -93,6 +118,8 @@ class FaceParsing():
             if mode == "neck":
                 parsing[np.isin(parsing, [1, 11, 12, 13, 14])] = 255
                 parsing[np.where(parsing!=255)] = 0
+            elif mode == "mouth":
+                parsing = self._create_mouth_mask(parsing)
             elif mode == "jaw":
                 face_region = np.isin(parsing, [1])*255
                 face_region = face_region.astype(np.uint8)

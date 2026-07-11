@@ -108,6 +108,7 @@ class TaskManager:
                     pads=task.params.get('pads', [0, 10, 0, 0]),
                     nosmooth=task.params.get('nosmooth', False),
                     face_det_batch_size=task.params.get('face_det_batch_size', 16),
+                    teeth_suppression=task.params.get('teeth_suppression', 25),
                     progress_callback=progress_callback
                 )
             else:

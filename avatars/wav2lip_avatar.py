@@ -28,6 +28,7 @@ import cv2
 import glob
 import pickle
 import copy
+import json
 
 import queue
 from queue import Queue
@@ -48,6 +49,45 @@ from registry import register
 
 device = initialize_device()
 logger.info('Using {} for inference.'.format(device))
+
+
+def suppress_teeth_highlights(frame, strength):
+    """Reduce bright, low-saturation teeth pixels in the expected mouth area."""
+    strength = float(np.clip(strength, 0, 100)) / 100.0
+    if strength == 0 or frame.size == 0:
+        return frame
+
+    result = frame.astype(np.uint8, copy=True)
+    height, width = result.shape[:2]
+    hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV)
+
+    # Wav2Lip face crops are normalized; the mouth occupies this lower-center ellipse.
+    spatial_mask = np.zeros((height, width), dtype=np.uint8)
+    center = (width // 2, int(height * 0.68))
+    axes = (max(1, int(width * 0.22)), max(1, int(height * 0.13)))
+    cv2.ellipse(spatial_mask, center, axes, 0, 0, 360, 255, -1)
+
+    saturation = hsv[:, :, 1]
+    value = hsv[:, :, 2]
+    roi_values = value[spatial_mask > 0]
+    if roi_values.size == 0:
+        return result
+
+    brightness_floor = min(245, max(175, int(np.percentile(roi_values, 60)) + 12))
+    candidate = (
+        (spatial_mask > 0)
+        & (saturation <= 105)
+        & (value >= brightness_floor)
+    ).astype(np.uint8) * 255
+
+    blur_size = max(3, int(min(height, width) * 0.035))
+    if blur_size % 2 == 0:
+        blur_size += 1
+    soft_mask = cv2.GaussianBlur(candidate, (blur_size, blur_size), 0).astype(np.float32) / 255.0
+
+    attenuation = soft_mask * strength * 70.0
+    hsv[:, :, 2] = np.clip(value.astype(np.float32) - attenuation, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
 def _load(checkpoint_path):
     if device == 'cuda':
@@ -75,6 +115,7 @@ def load_avatar(avatar_id):
     full_imgs_path = f"{avatar_path}/full_imgs" 
     face_imgs_path = f"{avatar_path}/face_imgs" 
     coords_path = f"{avatar_path}/coords.pkl"
+    avatar_info_path = f"{avatar_path}/avator_info.json"
     
     with open(coords_path, 'rb') as f:
         coord_list_cycle = pickle.load(f)
@@ -86,7 +127,13 @@ def load_avatar(avatar_id):
     input_face_list = sorted(input_face_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
     face_list_cycle = read_imgs(input_face_list)
 
-    return frame_list_cycle,face_list_cycle,coord_list_cycle
+    teeth_suppression = 0
+    if os.path.exists(avatar_info_path):
+        with open(avatar_info_path, 'r') as f:
+            avatar_info = json.load(f)
+        teeth_suppression = int(np.clip(avatar_info.get('teeth_suppression', 0), 0, 100))
+
+    return frame_list_cycle,face_list_cycle,coord_list_cycle,teeth_suppression
 
 @torch.no_grad()
 def warm_up(batch_size,model,modelres):
@@ -109,7 +156,7 @@ class LipReal(BaseAvatar):
         # self.res_frame_queue = Queue(self.batch_size*2)
         self.model = model
 
-        self.frame_list_cycle,self.face_list_cycle,self.coord_list_cycle = avatar
+        self.frame_list_cycle,self.face_list_cycle,self.coord_list_cycle,self.teeth_suppression = avatar
 
         self.asr = MelASR(opt,self)
         self.asr.warm_up()
@@ -143,7 +190,7 @@ class LipReal(BaseAvatar):
         bbox = self.coord_list_cycle[idx]
         combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
         y1, y2, x1, x2 = bbox
-        res_frame = cv2.resize(pred_frame.astype(np.uint8),(x2-x1,y2-y1))
+        processed_frame = suppress_teeth_highlights(pred_frame, self.teeth_suppression)
+        res_frame = cv2.resize(processed_frame,(x2-x1,y2-y1))
         combine_frame[y1:y2, x1:x2] = res_frame
         return combine_frame
-

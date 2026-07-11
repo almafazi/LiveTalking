@@ -23,9 +23,10 @@ POST /api/avatar/task
 | `bbox_shift` | 否 | int | 0 | 人脸框偏移（musetalk） |
 | `extra_margin` | 否 | int | 10 | 人脸裁剪额外边距（musetalk） |
 | `pads` | 否 | string | "0 10 0 0" | 填充：上 下 左 右（空格分隔） |
-| `parsing_mode` | 否 | string | "jaw" | 人脸解析模式（musetalk） |
+| `parsing_mode` | 否 | string | "jaw" | 人脸解析模式（musetalk）：`jaw` / `raw` / `mouth` |
 | `version` | 否 | string | "v15" | MuseTalk 版本：`v1` / `v15` |
 | `face_det_batch_size` | 否 | int | 16 | 人脸检测批大小（wav2lip） |
+| `teeth_suppression` | 否 | int | 25 | 牙齿高光抑制强度 0-100（wav2lip） |
 | `task_id` | 否 | string | 自动UUID | 自定义任务ID |
 | `notifyurl` | 否 | string | — | 回调URL，任务状态变更时POST通知 |
 
@@ -132,9 +133,11 @@ DELETE /api/avatar/task/{task_id}
 
 | model | 专有参数 | 生成模块 |
 |-------|----------|----------|
-| `wav2lip` | `face_det_batch_size`, `pads`, `nosmooth`, `img_size` | `avatars/wav2lip/genavatar.py` |
+| `wav2lip` | `face_det_batch_size`, `pads`, `nosmooth`, `img_size`, `teeth_suppression` | `avatars/wav2lip/genavatar.py` |
 | `musetalk` | `bbox_shift`, `extra_margin`, `parsing_mode`, `version` | `avatars/musetalk/genavatar.py` |
 
 ## 生成输出
 
 Avatar 数据保存在 `<data_path>/<avatar_id>/` 目录下，包含：`full_imgs/`、`face_imgs/`、`coords.pkl` 及模型特定文件。生成完成后可直接通过 `--avatar_id <avatar_id>` 启动服务。
+
+`parsing_mode=mouth` 仅支持 MuseTalk `version=v15`，只融合嘴部附近区域，以尽量保留原始鼻子、脸颊和下颌。

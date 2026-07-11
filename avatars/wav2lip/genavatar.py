@@ -47,7 +47,7 @@ def get_smoothened_boxes(boxes, T):
 		boxes[i] = np.mean(window, axis=0)
 	return boxes
 
-def generate_avatar(video_path, avatar_id, save_path='./data/avatars', img_size=96, pads=[0, 10, 0, 0], nosmooth=False, face_det_batch_size=16, progress_callback=None):
+def generate_avatar(video_path, avatar_id, save_path='./data/avatars', img_size=96, pads=[0, 10, 0, 0], nosmooth=False, face_det_batch_size=16, teeth_suppression=25, progress_callback=None):
     """
     生成avatar的核心逻辑
 
@@ -59,6 +59,7 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', img_size=
         pads: 人脸框填充 [top, bottom, left, right]
         nosmooth: 是否禁用平滑
         face_det_batch_size: 人脸检测批处理大小
+        teeth_suppression: 运行时牙齿高光抑制强度（0-100）
         progress_callback: 进度回调函数，接收 0-100 的整数
     """
     avatar_path = os.path.join(save_path, avatar_id)
@@ -67,6 +68,13 @@ def generate_avatar(video_path, avatar_id, save_path='./data/avatars', img_size=
     coords_path = os.path.join(avatar_path, "coords.pkl")
 
     osmakedirs([avatar_path, full_imgs_path, face_imgs_path])
+
+    with open(os.path.join(avatar_path, 'avator_info.json'), 'w') as f:
+        json.dump({
+            'avatar_id': avatar_id,
+            'video_path': video_path,
+            'teeth_suppression': int(teeth_suppression),
+        }, f)
 
     if progress_callback: progress_callback(5)
 
@@ -153,6 +161,8 @@ if __name__ == '__main__':
                         help='Padding (top, bottom, left, right). Please adjust to include chin at least')
     parser.add_argument('--face_det_batch_size', type=int,
                         help='Batch size for face detection', default=16)
+    parser.add_argument('--teeth_suppression', type=int, default=25,
+                        help='Teeth highlight suppression strength (0-100)')
     args = parser.parse_args()
 
     generate_avatar(
@@ -162,5 +172,6 @@ if __name__ == '__main__':
         img_size=args.img_size,
         pads=args.pads,
         nosmooth=args.nosmooth,
-        face_det_batch_size=args.face_det_batch_size
+        face_det_batch_size=args.face_det_batch_size,
+        teeth_suppression=args.teeth_suppression
     )

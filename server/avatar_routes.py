@@ -73,6 +73,18 @@ async def create_avatar_task(request):
 
         save_path = data_path
 
+        parsing_mode = params.get('parsing_mode', 'jaw')
+        if parsing_mode not in {'jaw', 'raw', 'mouth'}:
+            return json_error("parsing_mode must be one of: jaw, raw, mouth")
+        version = params.get('version', 'v15')
+        if version not in {'v1', 'v15'}:
+            return json_error("version must be one of: v1, v15")
+        if parsing_mode == 'mouth' and version != 'v15':
+            return json_error("parsing_mode mouth requires MuseTalk version v15")
+        teeth_suppression = int(params.get('teeth_suppression', 25))
+        if not 0 <= teeth_suppression <= 100:
+            return json_error("teeth_suppression must be between 0 and 100")
+
         task_params = {
             "video_path": video_path,
             "save_path": save_path,
@@ -80,9 +92,10 @@ async def create_avatar_task(request):
             "nosmooth": params.get('nosmooth', 'false').lower() == 'true' if isinstance(params.get('nosmooth'), str) else params.get('nosmooth', False),
             "bbox_shift": int(params.get('bbox_shift', 0)),
             "extra_margin": int(params.get('extra_margin', 10)),
-            "parsing_mode": params.get('parsing_mode', 'jaw'),
-            "version": params.get('version', 'v15'),
-            "face_det_batch_size": int(params.get('face_det_batch_size', 16))
+            "parsing_mode": parsing_mode,
+            "version": version,
+            "face_det_batch_size": int(params.get('face_det_batch_size', 16)),
+            "teeth_suppression": teeth_suppression
         }
 
         pads_str = params.get('pads', "0 10 0 0")
