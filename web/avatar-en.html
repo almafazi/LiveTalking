@@ -164,15 +164,11 @@
                                 <i class="bi bi-gear me-1"></i> Advanced (Optional)
                             </a>
                             <div class="collapse mt-2" id="advancedParams">
-                                <div class="param-group">
+                                <div class="param-group" id="wav2lipParams">
                                     <div class="row">
                                         <div class="col-6 mb-2">
                                             <label class="form-label small">Image Size</label>
                                             <input type="number" class="form-control form-control-sm" name="img_size" id="imgSizeInput" value="256">
-                                        </div>
-                                        <div class="col-6 mb-2">
-                                            <label class="form-label small">BBox Shift (musetalk)</label>
-                                            <input type="number" class="form-control form-control-sm" name="bbox_shift" value="0">
                                         </div>
                                     </div>
                                     <div class="row">
@@ -183,6 +179,34 @@
                                         <div class="col-6 mb-2">
                                             <label class="form-label small">Face Detect Batch Size</label>
                                             <input type="number" class="form-control form-control-sm" name="face_det_batch_size" value="4">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="param-group" id="musetalkParams">
+                                    <div class="row">
+                                        <div class="col-6 mb-2">
+                                            <label class="form-label small">BBox Shift</label>
+                                            <input type="number" class="form-control form-control-sm" name="bbox_shift" value="0">
+                                        </div>
+                                        <div class="col-6 mb-2">
+                                            <label class="form-label small">Extra Margin</label>
+                                            <input type="number" class="form-control form-control-sm" name="extra_margin" value="2" min="0">
+                                        </div>
+                                    </div>
+                                    <div class="row">
+                                        <div class="col-6 mb-2">
+                                            <label class="form-label small">Parsing Mode</label>
+                                            <select class="form-select form-select-sm" name="parsing_mode">
+                                                <option value="jaw" selected>Jaw</option>
+                                                <option value="raw">Raw</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-6 mb-2">
+                                            <label class="form-label small">MuseTalk Version</label>
+                                            <select class="form-select form-select-sm" name="version">
+                                                <option value="v15" selected>v1.5</option>
+                                                <option value="v1">v1</option>
+                                            </select>
                                         </div>
                                     </div>
                                 </div>
@@ -222,6 +246,20 @@
     const taskForm = document.getElementById('taskForm');
     const submitBtn = document.getElementById('submitBtn');
     const taskList = document.getElementById('taskList');
+    const modelSelect = document.getElementById('modelSelect');
+    const wav2lipParams = document.getElementById('wav2lipParams');
+    const musetalkParams = document.getElementById('musetalkParams');
+
+    function updateModelParams() {
+        const isMuseTalk = modelSelect.value === 'musetalk';
+        wav2lipParams.classList.toggle('d-none', isMuseTalk);
+        musetalkParams.classList.toggle('d-none', !isMuseTalk);
+        wav2lipParams.querySelectorAll('input, select').forEach(el => el.disabled = isMuseTalk);
+        musetalkParams.querySelectorAll('input, select').forEach(el => el.disabled = !isMuseTalk);
+    }
+
+    modelSelect.addEventListener('change', updateModelParams);
+    updateModelParams();
 
     taskForm.addEventListener('submit', async (e) => {
         e.preventDefault();
