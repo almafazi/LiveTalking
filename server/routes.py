@@ -5,6 +5,11 @@
 import json
 import os
 import asyncio
+import hmac
+import ipaddress
+import secrets
+import time
+from urllib.parse import urlsplit
 import aiohttp
 from aiohttp import web
 
@@ -24,9 +29,10 @@ def json_ok(data=None):
     )
 
 
-def json_error(msg: str, code: int = -1):
+def json_error(msg: str, code: int = -1, status: int = 200):
     """返回错误 JSON 响应"""
     return web.Response(
+        status=status,
         content_type="application/json",
         text=json.dumps({"code": code, "msg": str(msg)}),
     )
@@ -38,6 +44,72 @@ from server.avatar_routes import setup_avatar_routes
 def get_session(request, sessionid: str):
     """从 app 中获取 session 实例"""
     return session_manager.get_session(sessionid)
+
+
+ELEVENLABS_SESSION_TTL_SECONDS = 2 * 60 * 60
+ELEVENLABS_MAX_AUDIO_BYTES = 2 * 1024 * 1024
+
+
+def _is_loopback_request(request) -> bool:
+    try:
+        remote_is_loopback = ipaddress.ip_address(request.remote or "").is_loopback
+    except ValueError:
+        return False
+    host = (request.host or "").lower()
+    host_is_loopback = (
+        host == "localhost" or host.startswith("localhost:") or
+        host == "127.0.0.1" or host.startswith("127.0.0.1:") or
+        host == "[::1]" or host.startswith("[::1]:")
+    )
+    return remote_is_loopback and host_is_loopback
+
+
+def _check_elevenlabs_access(request):
+    """Protect credit-minting endpoints on public deployments.
+
+    Localhost remains convenient for development. Remote access requires an
+    explicit shared secret so a public Vast.ai port cannot mint signed URLs.
+    """
+    origin = request.headers.get("Origin", "")
+    if origin:
+        origin_host = urlsplit(origin).netloc.lower()
+        if not origin_host or origin_host != (request.host or "").lower():
+            return json_error("Cross-origin ElevenLabs access is not allowed", status=403)
+
+    expected = os.environ.get("ELEVENLABS_ACCESS_TOKEN", "").strip()
+    if not expected:
+        if _is_loopback_request(request):
+            return None
+        return json_error(
+            "Remote ElevenLabs access is disabled. Set ELEVENLABS_ACCESS_TOKEN on the server.",
+            status=503,
+        )
+
+    supplied = request.headers.get("X-ElevenLabs-Access-Token", "")
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        supplied = auth[7:].strip()
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        return json_error("Invalid ElevenLabs access token", status=401)
+    return None
+
+
+def _elevenlabs_sessions(app):
+    sessions = app.setdefault("elevenlabs_control_sessions", {})
+    now = time.monotonic()
+    expired = [token for token, state in sessions.items() if state["expires_at"] <= now]
+    for token in expired:
+        sessions.pop(token, None)
+    return sessions
+
+
+def _get_elevenlabs_control_session(request):
+    token = request.headers.get("X-LiveTalking-Token", "")
+    state = _elevenlabs_sessions(request.app).get(token)
+    if not token or state is None:
+        return None, json_error("Invalid or expired conversation token", status=401)
+    state["expires_at"] = time.monotonic() + ELEVENLABS_SESSION_TTL_SECONDS
+    return state, None
 
 
 # ─── 路由处理函数 ──────────────────────────────────────────────────────────
@@ -109,13 +181,94 @@ async def humanaudio(request):
         return json_error(str(e))
 
 
+async def elevenlabs_audio(request):
+    """Upload one protected, ordered ElevenLabs audio slice."""
+    try:
+        control, error = _get_elevenlabs_control_session(request)
+        if error is not None:
+            return error
+
+        form = await request.post()
+        try:
+            generation = int(form.get("generation", "-1"))
+        except (TypeError, ValueError):
+            return json_error("Invalid audio generation", status=400)
+        if generation != control["generation"]:
+            return json_error("Stale audio generation", code=-2, status=409)
+
+        fileobj = form.get("file")
+        if fileobj is None or not hasattr(fileobj, "file"):
+            return json_error("Missing audio file", status=400)
+        filebytes = fileobj.file.read(ELEVENLABS_MAX_AUDIO_BYTES + 1)
+        if len(filebytes) > ELEVENLABS_MAX_AUDIO_BYTES:
+            return json_error("Audio slice is too large", status=413)
+
+        avatar_session = get_session(request, control["sessionid"])
+        if avatar_session is None:
+            return json_error("session not found", status=404)
+        avatar_session.put_audio_file(filebytes, {"generation": generation})
+        return json_ok()
+    except Exception as e:
+        logger.exception('elevenlabs_audio exception:')
+        return json_error(str(e), status=500)
+
+
+async def elevenlabs_interrupt(request):
+    """Advance the audio generation before flushing stale avatar speech."""
+    try:
+        control, error = _get_elevenlabs_control_session(request)
+        if error is not None:
+            return error
+        params = await request.json()
+        try:
+            generation = int(params.get("generation", -1))
+        except (TypeError, ValueError):
+            return json_error("Invalid audio generation", status=400)
+        if generation < control["generation"]:
+            return json_ok(data={"generation": control["generation"], "stale": True})
+        control["generation"] = generation
+
+        avatar_session = get_session(request, control["sessionid"])
+        if avatar_session is None:
+            return json_error("session not found", status=404)
+        avatar_session.flush_talk()
+        return json_ok()
+    except Exception as e:
+        logger.exception('elevenlabs_interrupt exception:')
+        return json_error(str(e), status=500)
+
+
+async def elevenlabs_end(request):
+    """Revoke a browser conversation token and stop its queued speech."""
+    token = request.headers.get("X-LiveTalking-Token", "")
+    control, error = _get_elevenlabs_control_session(request)
+    if error is not None:
+        return error
+    _elevenlabs_sessions(request.app).pop(token, None)
+    avatar_session = get_session(request, control["sessionid"])
+    if avatar_session is not None:
+        avatar_session.flush_talk()
+    return json_ok()
+
+
 async def elevenlabs_signed_url(request):
     """获取 ElevenLabs ConvAI signed URL（API key 保留在服务端）"""
     try:
+        access_error = _check_elevenlabs_access(request)
+        if access_error is not None:
+            return access_error
+
         api_key = os.environ.get("ELEVENLABS_API_KEY", "")
         agent_id = os.environ.get("ELEVENLABS_AGENT_ID", "")
         if not api_key or not agent_id:
-            return json_error("Missing ELEVENLABS_API_KEY or ELEVENLABS_AGENT_ID")
+            return json_error(
+                "Missing ELEVENLABS_API_KEY or ELEVENLABS_AGENT_ID",
+                status=503,
+            )
+
+        sessionid = str(request.query.get("sessionid", "0"))
+        if get_session(request, sessionid) is None:
+            return json_error("session not found", status=404)
 
         base_url = os.environ.get(
             "ELEVENLABS_BASE_URL", "https://api.elevenlabs.io/v1"
@@ -127,12 +280,26 @@ async def elevenlabs_signed_url(request):
                 text = await resp.text()
                 if resp.status >= 400:
                     logger.error("ElevenLabs signed-url failed: %s %s", resp.status, text)
-                    return json_error(f"ElevenLabs error {resp.status}: {text}")
+                    return json_error(f"ElevenLabs error {resp.status}: {text}", status=502)
                 data = json.loads(text)
-        return web.json_response({"signedUrl": data.get("signed_url")})
+        signed_url = data.get("signed_url")
+        if not signed_url:
+            return json_error("ElevenLabs response did not contain signed_url", status=502)
+
+        control_token = secrets.token_urlsafe(32)
+        _elevenlabs_sessions(request.app)[control_token] = {
+            "sessionid": sessionid,
+            "generation": 0,
+            "expires_at": time.monotonic() + ELEVENLABS_SESSION_TTL_SECONDS,
+        }
+        return web.json_response({
+            "signedUrl": signed_url,
+            "controlToken": control_token,
+            "generation": 0,
+        }, headers={"Cache-Control": "no-store"})
     except Exception as e:
         logger.exception('elevenlabs_signed_url exception:')
-        return json_error(str(e))
+        return json_error(str(e), status=500)
 
 
 async def set_audiotype(request):
@@ -229,6 +396,9 @@ def setup_routes(app):
     app.router.add_post("/interrupt_talk", interrupt_talk)
     app.router.add_post("/is_speaking", is_speaking)
     app.router.add_get("/api/elevenlabs/signed-url", elevenlabs_signed_url)
+    app.router.add_post("/api/elevenlabs/audio", elevenlabs_audio)
+    app.router.add_post("/api/elevenlabs/interrupt", elevenlabs_interrupt)
+    app.router.add_post("/api/elevenlabs/end", elevenlabs_end)
     app.router.add_get("/api/admin/config", admin_config)
     app.router.add_get("/api/admin/sessions", admin_sessions)
 

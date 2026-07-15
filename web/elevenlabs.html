@@ -14,7 +14,8 @@
     #status { color: #0a7d00; margin: 8px 0; white-space: pre-wrap; }
     #err { color: #c00; margin: 4px 0; white-space: pre-wrap; }
     .row { display: flex; gap: 8px; margin-top: 12px; }
-    #text_input { flex: 1; padding: 8px; box-sizing: border-box; }
+    #text_input, #access_token { flex: 1; padding: 8px; box-sizing: border-box; }
+    .hint { color: #666; font-size: 13px; margin: 4px 0 0; }
     #log { margin-top: 16px; border: 1px solid #ddd; border-radius: 6px; padding: 8px 12px;
            max-height: 240px; overflow-y: auto; font-size: 14px; }
     #log .user { color: #555; }
@@ -35,6 +36,12 @@
     <button id="btn_stop" disabled>Stop</button>
     <button id="btn_reload">Reload video</button>
   </div>
+
+  <div class="row">
+    <input id="access_token" type="password" autocomplete="off"
+           placeholder="Deployment access token (required on public server)" />
+  </div>
+  <p class="hint">Set the same value as ELEVENLABS_ACCESS_TOKEN on Vast.ai. Localhost may leave it empty.</p>
 
   <div class="row">
     <input id="text_input" type="text" placeholder="Type a message to the agent…" />
@@ -151,12 +158,12 @@
       video.srcObject = sdk.stream;
 
       let pcConnected = false;
-      let mediaReceived = false;
+      const mediaKinds = new Set();
       let ready = false;
 
       function markReadyIfPossible() {
         if (ready || generation !== playerGeneration || sdk !== whepSdk) return;
-        if (!pcConnected || !mediaReceived) return;
+        if (!pcConnected || !mediaKinds.has('audio') || !mediaKinds.has('video')) return;
         ready = true;
         clearPlayerTimers();
         setError('');
@@ -175,7 +182,7 @@
       const defaultOnTrack = sdk.ontrack;
       sdk.ontrack = function (event) {
         defaultOnTrack.call(sdk, event);
-        mediaReceived = true;
+        if (event.track && event.track.kind) mediaKinds.add(event.track.kind);
         markReadyIfPossible();
       };
 
@@ -279,41 +286,71 @@
     // ─────────────────────────────────────────────────────────────────────────
     // Forward agent audio / control to LiveTalking
     // ─────────────────────────────────────────────────────────────────────────
-    // Serialize uploads so streamed slices reach the server in order.
+    // Serialize uploads so streamed slices reach the server in order. A new
+    // generation cancels both queued and in-flight slices from older speech.
+    let controlToken = null;
+    let audioGeneration = 0;
+    let audioQueueEpoch = 0;
+    let audioUploadController = new AbortController();
     let humanAudioQueue = Promise.resolve();
-    function postHumanAudio(wavBlob) {
+    async function readApiResponse(response) {
+      let data = null;
+      try { data = await response.json(); } catch (e) {}
+      if (!response.ok || !data || data.code !== 0) {
+        throw new Error((data && data.msg) || ('HTTP ' + response.status));
+      }
+      return data;
+    }
+
+    function postHumanAudio(wavBlob, generation) {
+      const epoch = audioQueueEpoch;
+      const signal = audioUploadController.signal;
       humanAudioQueue = humanAudioQueue.then(async () => {
+        if (!controlToken || generation !== audioGeneration || epoch !== audioQueueEpoch || signal.aborted) return;
         const fd = new FormData();
-        fd.append('sessionid', SESSIONID);
+        fd.append('generation', String(generation));
         fd.append('file', wavBlob, 'agent.wav');
         try {
-          await fetch('/humanaudio', { method: 'POST', body: fd });
+          const response = await fetch('/api/elevenlabs/audio', {
+            method: 'POST', body: fd, signal,
+            headers: { 'X-LiveTalking-Token': controlToken },
+          });
+          await readApiResponse(response);
         } catch (e) {
-          setError('humanaudio failed: ' + e);
+          if (e.name !== 'AbortError') setError('Avatar audio failed: ' + e.message);
         }
       });
       return humanAudioQueue;
     }
 
     function interruptTalk() {
-      fetch('/interrupt_talk', {
+      audioGeneration += 1;
+      audioQueueEpoch += 1;
+      audioUploadController.abort();
+      audioUploadController = new AbortController();
+      humanAudioQueue = Promise.resolve();
+      if (!controlToken) return Promise.resolve();
+      const token = controlToken;
+      return fetch('/api/elevenlabs/interrupt', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionid: SESSIONID }),
-      }).catch(function () {});
+        headers: { 'Content-Type': 'application/json', 'X-LiveTalking-Token': token },
+        body: JSON.stringify({ generation: audioGeneration }),
+      }).then(readApiResponse).catch((e) => {
+        if (e.name !== 'AbortError') setError('Interrupt failed: ' + e.message);
+      });
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Microphone capture (16 kHz mono AudioWorklet)
     // ─────────────────────────────────────────────────────────────────────────
-    const CAPTURE_SAMPLE_RATE = 16000;
-    const FRAME_SAMPLES = 2048;
+    const DEFAULT_CAPTURE_SAMPLE_RATE = 16000;
+    const MIC_FRAME_MS = 40;
     const MIC_AUDIO_CONSTRAINTS = {
       channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: false
     };
-    const WORKLET_SOURCE = `
+    function makeWorkletSource(frameSamples) { return `
       class MicCaptureProcessor extends AudioWorkletProcessor {
-        constructor() { super(); this._buffer = new Float32Array(${FRAME_SAMPLES}); this._length = 0; }
+        constructor() { super(); this._buffer = new Float32Array(${frameSamples}); this._length = 0; }
         process(inputs) {
           const input = inputs[0] && inputs[0][0];
           if (input) {
@@ -329,19 +366,36 @@
         }
       }
       registerProcessor("mic-capture-processor", MicCaptureProcessor);
-    `;
+    `; }
 
-    async function createMicCapture(onFrame) {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS });
+    function resampleLinear(input, outputLength) {
+      if (input.length === outputLength) return input;
+      const output = new Float32Array(outputLength);
+      if (outputLength === 1 || input.length === 1) { output.fill(input[0] || 0); return output; }
+      const scale = (input.length - 1) / (outputLength - 1);
+      for (let i = 0; i < outputLength; i++) {
+        const position = i * scale;
+        const left = Math.floor(position);
+        const right = Math.min(left + 1, input.length - 1);
+        const mix = position - left;
+        output[i] = input[left] * (1 - mix) + input[right] * mix;
+      }
+      return output;
+    }
+
+    async function createMicCapture(stream, onFrame, targetSampleRate) {
       let audioContext;
       try {
-        audioContext = new AudioContext({ sampleRate: CAPTURE_SAMPLE_RATE });
-        const workletUrl = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'text/javascript' }));
+        audioContext = new AudioContext({ sampleRate: targetSampleRate, latencyHint: 'interactive' });
+        const sourceFrameSamples = Math.max(1, Math.round(audioContext.sampleRate * MIC_FRAME_MS / 1000));
+        const targetFrameSamples = Math.max(1, Math.round(targetSampleRate * MIC_FRAME_MS / 1000));
+        const workletUrl = URL.createObjectURL(new Blob(
+          [makeWorkletSource(sourceFrameSamples)], { type: 'text/javascript' }));
         try { await audioContext.audioWorklet.addModule(workletUrl); }
         finally { URL.revokeObjectURL(workletUrl); }
         const source = audioContext.createMediaStreamSource(stream);
         const node = new AudioWorkletNode(audioContext, 'mic-capture-processor', { numberOfInputs: 1, numberOfOutputs: 0 });
-        node.port.onmessage = (event) => onFrame(event.data);
+        node.port.onmessage = (event) => onFrame(resampleLinear(event.data, targetFrameSamples));
         source.connect(node);
         if (audioContext.state !== 'running') await audioContext.resume();
         let stopped = false;
@@ -353,7 +407,9 @@
             try { node.disconnect(); } catch (e) {}
             stream.getTracks().forEach((t) => t.stop());
             audioContext.close().catch(() => {});
-          }
+          },
+          inputSampleRate: targetSampleRate,
+          deviceSampleRate: audioContext.sampleRate,
         };
       } catch (err) {
         stream.getTracks().forEach((t) => t.stop());
@@ -368,6 +424,7 @@
     // ─────────────────────────────────────────────────────────────────────────
     const FLUSH_MS = 200;          // ship a slice once ~200ms of audio is buffered
     const TAIL_IDLE_MS = 250;      // flush the sub-threshold tail promptly
+    const STALE_AUDIO_GUARD_MS = 250;
     const MAX_PENDING_AUDIO_CHUNKS = 80;
 
     class ConvaiClient {
@@ -377,12 +434,15 @@
         this.ready = false;
         this.closing = false;
         this.sampleRate = 16000;
-        this.formatOk = true;
+        this.inputSampleRate = DEFAULT_CAPTURE_SAMPLE_RATE;
         this.conversationId = null;
         this.pendingAudio = [];
         this.turnChunks = null;        // buffered Uint8Array PCM16 bytes (current slice) or null
         this.turnBytes = 0;
+        this.pcmRemainder = new Uint8Array(0);
         this.idleTimer = null;
+        this.agentAudioUntil = 0;
+        this.suppressAgentAudioUntil = 0;
       }
 
       isOpen() { return Boolean(this.ws && this.ws.readyState === WebSocket.OPEN); }
@@ -405,17 +465,26 @@
             if (data.type === 'conversation_initiation_metadata') {
               const meta = data.conversation_initiation_metadata_event || {};
               this.conversationId = meta.conversation_id || null;
-              const rate = parsePcmSampleRate(meta.agent_output_audio_format);
-              if (rate) { this.sampleRate = rate; this.formatOk = true; }
-              else {
-                this.formatOk = false;
-                this.handlers.onError?.('Agent output format is "' + meta.agent_output_audio_format +
-                  '", not PCM. Set the ElevenLabs agent output to pcm_16000 (or pcm_24000).');
+              const outputRate = parsePcmSampleRate(meta.agent_output_audio_format);
+              const inputRate = parsePcmSampleRate(meta.user_input_audio_format);
+              if (!outputRate || !inputRate) {
+                const message = 'ElevenLabs audio must use PCM. Current formats: output="' +
+                  meta.agent_output_audio_format + '", input="' + meta.user_input_audio_format + '".';
+                this.handlers.onError?.(message);
+                this.closing = true;
+                try { ws.close(); } catch (e) {}
+                if (!settled) { settled = true; reject(new Error(message)); }
+                return;
               }
+              this.sampleRate = outputRate;
+              this.inputSampleRate = inputRate;
               this.ready = true;
               this.flushPendingAudio();
               if (!settled) { settled = true; resolve(this); }
-              this.handlers.onReady?.({ sampleRate: this.sampleRate });
+              this.handlers.onReady?.({
+                sampleRate: this.sampleRate,
+                inputSampleRate: this.inputSampleRate,
+              });
               return;
             }
             this.handleEvent(data);
@@ -425,7 +494,7 @@
 
           ws.onclose = (event) => {
             const wasClosing = this.closing;
-            if (this.ws === ws) { this.ws = null; this.ready = false; this.pendingAudio = []; this.flushTurn(); }
+            if (this.ws === ws) { this.ws = null; this.ready = false; this.pendingAudio = []; this.discardTurn(); }
             if (!settled) { settled = true; reject(new Error('ConvAI closed before ready')); return; }
             if (!wasClosing) this.handlers.onDisconnect?.();
           };
@@ -448,11 +517,11 @@
               data.agent_response_correction_event?.corrected_agent_response || '');
             return;
           case 'user_transcript':
-            this.flushTurn();
+            this.flushTurn(true);
             this.handlers.onUserTranscript?.(data.user_transcription_event?.user_transcript || '');
             return;
           case 'interruption':
-            this.discardTurn();
+            this.discardTurn(STALE_AUDIO_GUARD_MS);
             this.handlers.onInterruption?.();
             return;
           default:
@@ -462,37 +531,60 @@
 
       handleAudioEvent(audioEvent) {
         const b64 = audioEvent.audio_base_64;
-        if (!b64 || !this.formatOk) return;
+        if (!b64 || performance.now() < this.suppressAgentAudioUntil) return;
         if (!this.turnChunks) { this.turnChunks = []; this.turnBytes = 0; }
         const bytes = base64ToBytes(b64);
+        const audioMs = bytes.byteLength / (this.sampleRate * 2) * 1000;
+        this.agentAudioUntil = Math.max(performance.now(), this.agentAudioUntil) + audioMs;
         this.turnChunks.push(bytes);
         this.turnBytes += bytes.byteLength;
         // Stream to LiveTalking as soon as ~FLUSH_MS of audio is buffered so the
         // avatar starts speaking without waiting for the whole turn.
         const flushBytes = Math.floor(this.sampleRate * 2 * (FLUSH_MS / 1000));
-        if (this.turnBytes >= flushBytes) this.flushTurn();
+        if (this.turnBytes >= flushBytes) this.flushTurn(false);
         else this.armTailTimer();
       }
 
       armTailTimer() {
         if (this.idleTimer) clearTimeout(this.idleTimer);
-        this.idleTimer = setTimeout(() => { this.idleTimer = null; this.flushTurn(); }, TAIL_IDLE_MS);
+        this.idleTimer = setTimeout(() => { this.idleTimer = null; this.flushTurn(true); }, TAIL_IDLE_MS);
       }
 
-      // Ship whatever PCM is currently buffered to LiveTalking as a WAV slice.
-      flushTurn() {
+      // Ship only complete 20 ms frames. Carry partial frames across requests so
+      // BaseAvatar's 320-sample framing never drops audio at WAV boundaries.
+      flushTurn(final = false) {
         if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
-        if (!this.turnChunks || this.turnBytes === 0) { this.turnChunks = null; this.turnBytes = 0; return; }
-        const pcm = concatBytes(this.turnChunks);
+        const chunks = [];
+        if (this.pcmRemainder.byteLength) chunks.push(this.pcmRemainder);
+        if (this.turnChunks) chunks.push(...this.turnChunks);
         this.turnChunks = null; this.turnBytes = 0;
-        postHumanAudio(pcm16ToWavBlob(pcm, this.sampleRate));
+        if (!chunks.length) return;
+
+        const pcm = concatBytes(chunks);
+        const frameBytes = Math.max(2, Math.round(this.sampleRate * 0.02) * 2);
+        let sendBytes = Math.floor(pcm.byteLength / frameBytes) * frameBytes;
+        if (final && sendBytes < pcm.byteLength) sendBytes += frameBytes;
+        if (sendBytes === 0) { this.pcmRemainder = pcm; return; }
+
+        const aligned = new Uint8Array(sendBytes);
+        aligned.set(pcm.subarray(0, Math.min(pcm.byteLength, sendBytes)));
+        this.pcmRemainder = final ? new Uint8Array(0) : pcm.slice(sendBytes);
+        postHumanAudio(pcm16ToWavBlob(aligned, this.sampleRate), audioGeneration);
       }
 
       // Drop the buffered slice without sending (barge-in).
-      discardTurn() {
+      discardTurn(suppressMs = 0) {
         if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
         this.turnChunks = null; this.turnBytes = 0;
+        this.pcmRemainder = new Uint8Array(0);
+        this.agentAudioUntil = 0;
+        if (suppressMs > 0) {
+          this.suppressAgentAudioUntil = Math.max(
+            this.suppressAgentAudioUntil, performance.now() + suppressMs);
+        }
       }
+
+      isAgentSpeaking() { return performance.now() < this.agentAudioUntil; }
 
       sendJson(payload) { if (!this.isOpen()) return false; this.ws.send(JSON.stringify(payload)); return true; }
 
@@ -529,22 +621,38 @@
     const btnSend = document.getElementById('btn_send');
     const btnReload = document.getElementById('btn_reload');
     const textInput = document.getElementById('text_input');
+    const accessTokenInput = document.getElementById('access_token');
 
     let client = null;
     let mic = null;
+    let pendingMicStream = null;
 
     async function fetchSignedUrl() {
-      const res = await fetch('/api/elevenlabs/signed-url');
-      const data = await res.json();
-      if (data && data.signedUrl) return data.signedUrl;
-      throw new Error((data && (data.msg || data.error)) || 'No signedUrl returned');
+      const deploymentToken = accessTokenInput.value.trim();
+      const headers = deploymentToken ? { 'X-ElevenLabs-Access-Token': deploymentToken } : {};
+      const res = await fetch('/api/elevenlabs/signed-url?sessionid=' + encodeURIComponent(SESSIONID), {
+        headers, cache: 'no-store',
+      });
+      let data = null;
+      try { data = await res.json(); } catch (e) {}
+      if (!res.ok || !data || !data.signedUrl || !data.controlToken) {
+        throw new Error((data && (data.msg || data.error)) || ('Signed URL failed: HTTP ' + res.status));
+      }
+      controlToken = data.controlToken;
+      audioGeneration = Number.isInteger(data.generation) ? data.generation : 0;
+      audioQueueEpoch += 1;
+      audioUploadController.abort();
+      audioUploadController = new AbortController();
+      humanAudioQueue = Promise.resolve();
+      return data.signedUrl;
     }
 
     function makeHandlers() {
       return {
-        onReady: ({ sampleRate }) => setStatus('Agent connected (PCM ' + sampleRate + ' Hz). Speak or type.'),
+        onReady: ({ sampleRate, inputSampleRate }) => setStatus(
+          'Agent connected (output ' + sampleRate + ' Hz, input ' + inputSampleRate + ' Hz). Starting mic…'),
         onError: (msg) => setError(msg),
-        onDisconnect: () => { setStatus('Agent disconnected.'); teardownConversation(); },
+        onDisconnect: () => { setStatus('Agent disconnected. Click Start to reconnect.'); teardownConversation(); },
         onUserTranscript: (text) => appendLog('user', text),
         onAgentResponse: (text) => appendLog('agent', text),
         onAgentResponseCorrection: (text) => appendLog('agent', '(corrected) ' + text),
@@ -556,15 +664,33 @@
       setError('');
       btnStart.disabled = true;
       try {
+        video.muted = false;
+        video.play().catch(() => {});
+        setStatus('Requesting microphone permission…');
+        pendingMicStream = await navigator.mediaDevices.getUserMedia({ audio: MIC_AUDIO_CONSTRAINTS });
         setStatus('Requesting signed URL…');
         const signedUrl = await fetchSignedUrl();
         setStatus('Connecting to agent…');
         client = new ConvaiClient(makeHandlers());
         await client.connect({ signedUrl });
-        // Barge-in: when the user starts talking, stop the current avatar speech.
-        mic = await createMicCapture((frame) => {
+        let speechFrames = 0;
+        let lastLocalInterrupt = 0;
+        mic = await createMicCapture(pendingMicStream, (frame) => {
+          let energy = 0;
+          for (let i = 0; i < frame.length; i++) energy += frame[i] * frame[i];
+          const rms = Math.sqrt(energy / Math.max(1, frame.length));
+          speechFrames = rms >= 0.03 ? speechFrames + 1 : 0;
+          if (speechFrames >= 2 && client.isAgentSpeaking() && performance.now() - lastLocalInterrupt > 1000) {
+            lastLocalInterrupt = performance.now();
+            speechFrames = 0;
+            client.discardTurn(STALE_AUDIO_GUARD_MS);
+            interruptTalk();
+          }
           client.sendAudioChunk(frame);
-        });
+        }, client.inputSampleRate);
+        pendingMicStream = null;
+        setStatus('Agent connected. Speak or type (mic ' + mic.deviceSampleRate + ' → ' +
+          mic.inputSampleRate + ' Hz, avatar output ' + client.sampleRate + ' Hz).');
         btnStop.disabled = false;
         btnSend.disabled = false;
       } catch (e) {
@@ -574,8 +700,24 @@
     }
 
     function teardownConversation() {
+      if (pendingMicStream) {
+        pendingMicStream.getTracks().forEach((track) => track.stop());
+        pendingMicStream = null;
+      }
       if (mic) { try { mic.stop(); } catch (e) {} mic = null; }
       if (client) { try { client.end(); } catch (e) {} client = null; }
+      audioQueueEpoch += 1;
+      audioUploadController.abort();
+      audioUploadController = new AbortController();
+      humanAudioQueue = Promise.resolve();
+      if (controlToken) {
+        const token = controlToken;
+        controlToken = null;
+        fetch('/api/elevenlabs/end', {
+          method: 'POST', keepalive: true,
+          headers: { 'X-LiveTalking-Token': token },
+        }).catch(() => {});
+      }
       btnStart.disabled = false;
       btnStop.disabled = true;
       btnSend.disabled = true;
@@ -584,8 +726,8 @@
     function sendText() {
       const text = textInput.value.trim();
       if (!text || !client) return;
-      interruptTalk();            // barge-in on the current avatar speech
-      client.discardTurn();
+      client.discardTurn(STALE_AUDIO_GUARD_MS);
+      interruptTalk();            // invalidate old audio before sending the new turn
       client.sendUserMessage(text);
       appendLog('user', text);
       textInput.value = '';
