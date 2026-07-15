@@ -40,6 +40,21 @@ Browser ──TCP :8010──► LiveTalking (API + /rtcpushapi.html + /srs-live
 | TCP 10200 | `$VAST_TCP_PORT_10200` | WHEP media TCP (opsional) |
 | UDP 10001 | `$VAST_UDP_PORT_10001` | RTC media (publish lokal) |
 
+### WHEP/WebRTC-over-TCP untuk player utama
+
+Expose container **TCP 10200** di Vast.ai, lalu set candidate publik pada proses
+LiveTalking (bukan pada browser):
+
+```bash
+export SRS_RTC_EIP="$PUBLIC_IPADDR:$VAST_TCP_PORT_10200"
+```
+
+Domain HTTPS tetap meneruskan UI/API dan `/srs-whep/*` ke LiveTalking `8010`.
+Media WebRTC TCP `10200` harus dapat dicapai langsung oleh browser; jangan
+dilewatkan melalui reverse proxy HTTP biasa. Halaman `elevenlabs.html` mencoba
+WHEP terlebih dahulu dan otomatis kembali ke HTTP-FLV bila signaling, ICE, atau
+media tidak siap dalam 8 detik.
+
 **Jangan** ikuti docs AutoDL 1:1 (Docker SRS, port 1985/8000) — di Vast port fixed, no Docker-in-Docker, UDP NAT beda.
 
 ---

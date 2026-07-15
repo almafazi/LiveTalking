@@ -43,6 +43,7 @@
 
   <div id="log"></div>
 
+  <script src="srs.sdk.js"></script>
   <script src="mpegts-1.7.3.min.js"></script>
   <script type="module">
     // ─────────────────────────────────────────────────────────────────────────
@@ -67,22 +68,58 @@
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // FLV player (same as rtcpushapi.html) — the ONLY audible source.
+    // WHEP/WebRTC-over-TCP player with HTTP-FLV fallback.
     // ─────────────────────────────────────────────────────────────────────────
+    const whepUrl = window.location.origin + '/srs-whep/rtc/v1/whep/?app=live&stream=livestream';
     const flvUrl = window.location.origin + '/srs-live/live/livestream.flv';
-    let flvPlayer = null;
+    const WHEP_CONNECT_TIMEOUT_MS = 8000;
+    const WHEP_DISCONNECTED_GRACE_MS = 3000;
 
-    function loadVideo() {
-      setError('');
+    let whepSdk = null;
+    let flvPlayer = null;
+    let playerGeneration = 0;
+    let whepConnectTimer = null;
+    let whepDisconnectTimer = null;
+
+    function clearPlayerTimers() {
+      if (whepConnectTimer) clearTimeout(whepConnectTimer);
+      if (whepDisconnectTimer) clearTimeout(whepDisconnectTimer);
+      whepConnectTimer = null;
+      whepDisconnectTimer = null;
+    }
+
+    function closeWhep() {
+      clearPlayerTimers();
+      if (whepSdk) {
+        try { whepSdk.close(); } catch (e) {}
+        whepSdk = null;
+      }
+      if (video.srcObject) video.srcObject = null;
+    }
+
+    function closeFlv() {
       if (flvPlayer) {
         try { flvPlayer.destroy(); } catch (e) {}
         flvPlayer = null;
       }
+      video.removeAttribute('src');
+    }
+
+    function closePlayer() {
+      closeWhep();
+      closeFlv();
+    }
+
+    function loadFlv(generation, reason) {
+      if (generation !== playerGeneration) return;
+      closeWhep();
+      closeFlv();
       if (!window.mpegts || !mpegts.getFeatureList().mseLivePlayback) {
         setError('This browser does not support MSE live playback (mpegts.js).');
         return;
       }
-      setStatus('Connecting to stream…');
+      setStatus('Connecting via HTTP-FLV fallback…');
+      if (reason) setError('WHEP unavailable; using HTTP-FLV: ' + reason);
       flvPlayer = mpegts.createPlayer(
         { type: 'flv', isLive: true, url: flvUrl },
         { enableStashBuffer: false, liveBufferLatencyChasing: true }
@@ -93,10 +130,87 @@
         setError('Playback error: ' + type + ' / ' + detail);
       });
       flvPlayer.on(mpegts.Events.MEDIA_INFO, function () {
-        setStatus('Streaming.');
+        if (generation === playerGeneration) setStatus('Streaming via HTTP-FLV fallback.');
       });
       const p = flvPlayer.play();
       if (p && p.catch) { p.catch(function (e) { setError('Autoplay blocked: ' + e); }); }
+    }
+
+    function loadWhep(generation) {
+      if (generation !== playerGeneration) return;
+      closePlayer();
+      setStatus('Connecting via WHEP/WebRTC-over-TCP…');
+
+      if (typeof SrsRtcWhipWhepAsync !== 'function') {
+        loadFlv(generation, 'SRS WHEP SDK is unavailable.');
+        return;
+      }
+
+      const sdk = new SrsRtcWhipWhepAsync();
+      whepSdk = sdk;
+      video.srcObject = sdk.stream;
+
+      let pcConnected = false;
+      let mediaReceived = false;
+      let ready = false;
+
+      function markReadyIfPossible() {
+        if (ready || generation !== playerGeneration || sdk !== whepSdk) return;
+        if (!pcConnected || !mediaReceived) return;
+        ready = true;
+        clearPlayerTimers();
+        setError('');
+        setStatus('Streaming via WHEP/WebRTC-over-TCP.');
+        const playPromise = video.play();
+        if (playPromise && playPromise.catch) {
+          playPromise.catch((e) => setError('Autoplay blocked: ' + e));
+        }
+      }
+
+      function fallback(reason) {
+        if (generation !== playerGeneration || sdk !== whepSdk) return;
+        loadFlv(generation, reason);
+      }
+
+      const defaultOnTrack = sdk.ontrack;
+      sdk.ontrack = function (event) {
+        defaultOnTrack.call(sdk, event);
+        mediaReceived = true;
+        markReadyIfPossible();
+      };
+
+      sdk.pc.addEventListener('connectionstatechange', function () {
+        if (generation !== playerGeneration || sdk !== whepSdk) return;
+        const state = sdk.pc.connectionState;
+        if (state === 'connected') {
+          pcConnected = true;
+          if (whepDisconnectTimer) clearTimeout(whepDisconnectTimer);
+          whepDisconnectTimer = null;
+          markReadyIfPossible();
+        } else if (state === 'failed' || state === 'closed') {
+          fallback('WebRTC connection ' + state + '.');
+        } else if (state === 'disconnected') {
+          if (whepDisconnectTimer) clearTimeout(whepDisconnectTimer);
+          whepDisconnectTimer = setTimeout(function () {
+            fallback('WebRTC remained disconnected.');
+          }, WHEP_DISCONNECTED_GRACE_MS);
+        }
+      });
+
+      whepConnectTimer = setTimeout(function () {
+        fallback('No media received within 8 seconds.');
+      }, WHEP_CONNECT_TIMEOUT_MS);
+
+      sdk.play(whepUrl).catch(function (reason) {
+        const detail = reason && reason.responseText ? reason.responseText : String(reason || 'signaling failed');
+        fallback(detail);
+      });
+    }
+
+    function loadVideo() {
+      setError('');
+      const generation = ++playerGeneration;
+      loadWhep(generation);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -483,7 +597,7 @@
     textInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendText(); });
     btnReload.addEventListener('click', loadVideo);
     window.addEventListener('load', loadVideo);
-    window.addEventListener('beforeunload', teardownConversation);
+    window.addEventListener('beforeunload', () => { teardownConversation(); closePlayer(); });
   </script>
 </body>
 

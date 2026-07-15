@@ -14,6 +14,12 @@
 #      （LiveTalking 进程读取该变量，注入到 WHEP answer 的候选地址）
 set -e
 
+# Vast maps container TCP 10200 to a dynamic public port. Advertise that public
+# address in the WHEP SDP answer unless the operator supplied an explicit value.
+if [ -z "${SRS_RTC_EIP:-}" ] && [ -n "${PUBLIC_IPADDR:-}" ] && [ -n "${VAST_TCP_PORT_10200:-}" ]; then
+  export SRS_RTC_EIP="${PUBLIC_IPADDR}:${VAST_TCP_PORT_10200}"
+fi
+
 export CANDIDATE="${PUBLIC_IPADDR:-${CANDIDATE:-}}"
 SRS_DIR="${SRS_DIR:-/usr/local/srs}"
 LT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,7 +37,7 @@ if ! curl -sf http://127.0.0.1:10100/api/v1/versions >/dev/null 2>&1; then
 fi
 
 # 2) 启动 LiveTalking（rtcpush，WHIP 推流到本机 SRS）
-if ! curl -sf http://127.0.0.1:18010/rtcpushapi.html >/dev/null 2>&1; then
+if ! curl -sf http://127.0.0.1:8010/rtcpushapi.html >/dev/null 2>&1; then
   echo "Starting LiveTalking..."
   pkill -f 'app.py --transport' 2>/dev/null || true
   sleep 1
@@ -39,7 +45,7 @@ if ! curl -sf http://127.0.0.1:18010/rtcpushapi.html >/dev/null 2>&1; then
     --transport rtcpush \
     --model wav2lip \
     --avatar_id wav2lip256_avatar1 \
-    --listenport 18010 \
+    --listenport 8010 \
     --batch_size 4 \
     --push_url 'http://127.0.0.1:10100/rtc/v1/whip/?app=live&stream=livestream&eip=127.0.0.1:10001' \
     --max_session 1 \
@@ -48,5 +54,6 @@ if ! curl -sf http://127.0.0.1:18010/rtcpushapi.html >/dev/null 2>&1; then
 fi
 
 echo "SRS:  $(curl -s http://127.0.0.1:10100/api/v1/versions | head -c 120)"
-echo "UI:   http://${PUBLIC_IPADDR:-HOST}:${VAST_TCP_PORT_18010:-PORT}/rtcpushapi.html"
+echo "UI:   http://${PUBLIC_IPADDR:-HOST}:${VAST_TCP_PORT_8010:-PORT}/rtcpushapi.html"
+echo "WHEP: ${SRS_RTC_EIP:-not configured} (open /rtcpushwhep.html)"
 curl -s http://127.0.0.1:10100/api/v1/streams/ | head -c 400; echo
