@@ -1,0 +1,43 @@
+@import 'tailwindcss';
+
+:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #fff; background: #12051f; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; overflow: hidden; }
+button, input { font: inherit; }
+.experience { --accent: #a855f7; position: relative; min-height: 100svh; overflow: hidden; background: #160622; }
+.studio { position: absolute; inset: 0; background: radial-gradient(90% 72% at 48% 28%, color-mix(in srgb, var(--accent) 52%, transparent), transparent 62%), linear-gradient(180deg, #210832, #310d49 52%, #150820); }
+.experience[data-background='black'] .studio { background: radial-gradient(circle at 48% 28%, #41414a, #09090c 58%, #020203); }
+.experience[data-background='green'] .studio { background: radial-gradient(circle at 48% 28%, #168b4b, #062718 58%, #021108); }
+.experience[data-background='white'] .studio { background: radial-gradient(circle at 48% 28%, #fff, #e7e4f2 64%, #c9c3df); }
+.floor { position: absolute; inset: auto 0 0; height: 38%; background: radial-gradient(55% 100% at 48% 100%, color-mix(in srgb, var(--accent) 38%, transparent), transparent 70%); }
+.brand { position: absolute; top: 6vh; left: 50%; transform: translateX(-50%); z-index: 2; font-size: clamp(3rem, 8vw, 8rem); font-weight: 900; letter-spacing: .08em; color: rgba(255,255,255,.16); white-space: nowrap; }
+.brand img { max-width: min(46vw, 520px); max-height: 16vh; object-fit: contain; opacity: .8; }
+.avatarVideo { position: absolute; z-index: 1; inset: 0 22vw 0 0; width: calc(100% - 22vw); height: 100%; object-fit: contain; object-position: center bottom; filter: drop-shadow(0 28px 38px rgba(0,0,0,.5)); }
+.controls { position: absolute; z-index: 4; top: 50%; right: 24px; transform: translateY(-50%); width: min(28vw, 310px); display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.languages { display: flex; gap: 4px; padding: 4px; border-radius: 999px; background: rgba(7,7,12,.45); backdrop-filter: blur(14px); }
+.languages button { border: 0; padding: 7px 13px; border-radius: 999px; background: transparent; color: rgba(255,255,255,.6); cursor: pointer; font-weight: 800; }
+.languages button.active { color: #fff; background: var(--accent); }
+.micButton { width: 76px; height: 76px; border: 1px solid rgba(255,255,255,.24); border-radius: 50%; display: grid; place-items: center; color: #fff; background: color-mix(in srgb, var(--accent) 72%, #1f1233); box-shadow: 0 0 0 12px rgba(255,255,255,.06), 0 18px 40px rgba(0,0,0,.35); cursor: pointer; }
+.micButton.listening { animation: pulse 1.8s infinite; }
+.micButton.speaking { box-shadow: 0 0 0 13px color-mix(in srgb, var(--accent) 22%, transparent), 0 0 42px var(--accent); }
+.status { margin: 0; min-height: 24px; font-weight: 700; text-align: center; text-shadow: 0 2px 12px #000; }
+.prompt { display: flex; width: 100%; padding: 5px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: rgba(7,7,12,.5); backdrop-filter: blur(16px); }
+.prompt input { min-width: 0; flex: 1; border: 0; outline: 0; color: #fff; background: transparent; padding: 10px 12px; }
+.prompt button, .roundButton { border: 0; color: #fff; background: var(--accent); cursor: pointer; }
+.prompt button { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; }
+.prompt button:disabled { opacity: .35; }
+.error { margin: 0; padding: 9px 12px; border-radius: 10px; color: #fecdd3; background: rgba(136,19,55,.7); font-size: .85rem; }
+.roundButton { position: absolute; z-index: 5; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 50%; background: rgba(10,8,16,.36); backdrop-filter: blur(12px); }
+.mute { top: 22px; right: 22px; }.reload { left: 18px; bottom: 18px; }
+.loadingScreen, .maintenanceScreen { min-height: 100svh; display: grid; place-content: center; justify-items: center; gap: 12px; text-align: center; background: radial-gradient(circle, #3b1458, #100319); }
+.maintenanceScreen button { border: 0; border-radius: 999px; padding: 10px 20px; cursor: pointer; }
+.spin { animation: spin 1.6s linear infinite; }
+@keyframes pulse { 50% { transform: scale(1.06); box-shadow: 0 0 0 20px rgba(168,85,247,.06); } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 760px) {
+    .avatarVideo { inset: 0; width: 100%; height: 72%; }
+    .controls { top: auto; bottom: max(20px, env(safe-area-inset-bottom)); right: 50%; transform: translateX(50%); width: min(90vw, 440px); gap: 9px; }
+    .brand { top: 3vh; font-size: 12vw; }
+    .micButton { width: 62px; height: 62px; }
+    .mute { top: 14px; right: 14px; }
+}

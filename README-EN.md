@@ -158,6 +158,9 @@ python app.py --transport webrtc --model wav2lip --avatar_id wav2lip256_avatar1
 
 ## 4. API Documentation
 
+For the Laravel/Filament admin, React experience, and GPU runtime-manager
+monorepo architecture, see [Control Plane Guide](docs/control-plane.md).
+
 | Document | Description |
 |----------|-------------|
 | [docs/api.md](docs/api.md) | General API — WebRTC, text/audio driver, recording, action choreography |

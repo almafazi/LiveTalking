@@ -1,0 +1,17 @@
+.git
+.env
+.venv
+data
+models
+build
+dist
+*.log
+control-plane/.env
+control-plane/vendor
+control-plane/node_modules
+control-plane/public/build
+control-plane/database/database.sqlite
+control-plane/storage/logs
+control-plane/storage/framework
+runtime-manager/state.json
+runtime-manager/work

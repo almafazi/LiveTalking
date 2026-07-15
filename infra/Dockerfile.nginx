@@ -1,0 +1,13 @@
+FROM node:24-bookworm-slim AS frontend
+WORKDIR /app
+COPY control-plane/package*.json ./
+RUN npm ci
+COPY control-plane/resources ./resources
+COPY control-plane/vite.config.js ./
+COPY control-plane/public ./public
+RUN npm run build
+
+FROM nginx:1.29-alpine
+COPY infra/nginx.conf.template /etc/nginx/templates/default.conf.template
+COPY control-plane/public /var/www/html/public
+COPY --from=frontend /app/public/build /var/www/html/public/build

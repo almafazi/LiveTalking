@@ -112,6 +112,17 @@ def _get_elevenlabs_control_session(request):
     return state, None
 
 
+def _check_runtime_manager_access(request):
+    expected = os.environ.get("RUNTIME_MANAGER_TOKEN", "").strip()
+    auth = request.headers.get("Authorization", "")
+    supplied = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not expected:
+        return json_error("RUNTIME_MANAGER_TOKEN is not configured", status=503)
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        return json_error("Invalid runtime manager token", status=401)
+    return None
+
+
 # ─── 路由处理函数 ──────────────────────────────────────────────────────────
 
 async def human(request):
@@ -302,6 +313,33 @@ async def elevenlabs_signed_url(request):
         return json_error(str(e), status=500)
 
 
+async def create_audio_session(request):
+    """Mint a short-lived avatar-audio token without exposing provider secrets."""
+    access_error = _check_runtime_manager_access(request)
+    if access_error is not None:
+        return access_error
+
+    try:
+        params = await request.json() if request.can_read_body else {}
+    except Exception:
+        params = {}
+    sessionid = str(params.get("sessionid", "0"))
+    if get_session(request, sessionid) is None:
+        return json_error("session not found", status=404)
+
+    control_token = secrets.token_urlsafe(32)
+    _elevenlabs_sessions(request.app)[control_token] = {
+        "sessionid": sessionid,
+        "generation": 0,
+        "expires_at": time.monotonic() + ELEVENLABS_SESSION_TTL_SECONDS,
+    }
+    return web.json_response({
+        "control_token": control_token,
+        "generation": 0,
+        "expires_in": ELEVENLABS_SESSION_TTL_SECONDS,
+    }, headers={"Cache-Control": "no-store"})
+
+
 async def set_audiotype(request):
     """设置自定义状态（动作编排）"""
     try:
@@ -396,6 +434,7 @@ def setup_routes(app):
     app.router.add_post("/interrupt_talk", interrupt_talk)
     app.router.add_post("/is_speaking", is_speaking)
     app.router.add_get("/api/elevenlabs/signed-url", elevenlabs_signed_url)
+    app.router.add_post("/api/audio/session", create_audio_session)
     app.router.add_post("/api/elevenlabs/audio", elevenlabs_audio)
     app.router.add_post("/api/elevenlabs/interrupt", elevenlabs_interrupt)
     app.router.add_post("/api/elevenlabs/end", elevenlabs_end)

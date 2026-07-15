@@ -63,7 +63,7 @@ def parse_args():
     parser.add_argument('--avatar_id', type=str, default='wav2lip256_avatar1',
                         help="avatar id in data/avatars")
     parser.add_argument('--batch_size', type=int, default=16, help="infer batch")
-    parser.add_argument('--modelres', type=int, default=192)
+    parser.add_argument('--modelres', type=int, default=256)
     parser.add_argument('--modelfile', type=str, default='')
 
     # ─── 自定义动作和多形象 ────────────────────────────────────────────
