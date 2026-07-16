@@ -214,7 +214,29 @@ def main():
                 push_url = opt.push_url
                 if k!=0:
                     push_url = opt.push_url+str(k)
-                loop.run_until_complete(rtc_manager.handle_rtcpush(push_url, str(k)))
+                try:
+                    loop.run_until_complete(rtc_manager.handle_rtcpush(push_url, str(k)))
+                except Exception as error:
+                    # Keep HTTP health up; reconnect WHIP in background so deploy
+                    # does not fail on a transient SRS publisher race.
+                    logger.error("rtcpush WHIP startup failed: %s — retrying in background", error)
+
+                    async def _retry_whip(url=push_url, sid=str(k)):
+                        delay = 2.0
+                        while True:
+                            try:
+                                await asyncio.sleep(delay)
+                                await rtc_manager.handle_rtcpush(url, sid)
+                                logger.info("rtcpush WHIP background reconnect ok sid=%s", sid)
+                                return
+                            except Exception as retry_error:
+                                logger.warning(
+                                    "rtcpush WHIP background retry failed sid=%s: %s",
+                                    sid, retry_error,
+                                )
+                                delay = min(delay * 1.5, 15.0)
+
+                    loop.create_task(_retry_whip())
         loop.run_forever()    
     #Thread(target=run_server, args=(web.AppRunner(appasync),)).start()
     run_server(web.AppRunner(appasync))

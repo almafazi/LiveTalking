@@ -112,56 +112,88 @@ class RTCManager:
             }),
         )
 
-    async def handle_rtcpush(self, push_url, sessionid: str):
-        """RTCPush 模式：主动推流"""
+    async def handle_rtcpush(self, push_url, sessionid: str, retries: int = 5):
+        """RTCPush 模式：主动推流。Retry WHIP when SRS drops the publisher race on restart."""
         import aiohttp
-        await session_manager.create_session({}, sessionid)
+
+        if not session_manager.has_session(sessionid):
+            await session_manager.create_session({}, sessionid)
         avatar_session = session_manager.get_session(sessionid)
+        if avatar_session is None:
+            raise RuntimeError(f"session {sessionid} is not ready")
 
-        pc = RTCPeerConnection()
-        self.pcs.add(pc)
+        last_error = None
+        for attempt in range(1, retries + 1):
+            pc = RTCPeerConnection()
+            self.pcs.add(pc)
 
-        @pc.on("connectionstatechange")
-        async def on_connectionstatechange():
-            logger.info("Connection state is %s", pc.connectionState)
-            if pc.connectionState == "failed":
+            @pc.on("connectionstatechange")
+            async def on_connectionstatechange(pc=pc):
+                logger.info("Connection state is %s", pc.connectionState)
+                if pc.connectionState == "failed":
+                    await pc.close()
+                    self.pcs.discard(pc)
+
+            from server.webrtc import HumanPlayer
+            player = HumanPlayer(avatar_session)
+            pc.addTrack(player.audio)
+            pc.addTrack(player.video)
+
+            # H264 优先，便于 SRS remux 成 FLV 给浏览器播放
+            _prefer_h264(pc)
+
+            await pc.setLocalDescription(await pc.createOffer())
+            logger.info("rtcpush WHIP -> %s (attempt %d/%d)", push_url, attempt, retries)
+
+            try:
+                timeout = aiohttp.ClientTimeout(total=15)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(
+                        push_url,
+                        data=pc.localDescription.sdp,
+                        headers={"Content-Type": "application/sdp"},
+                    ) as response:
+                        answer_sdp = await response.text()
+                        if response.status >= 400:
+                            last_error = RuntimeError(
+                                f"WHIP failed status={response.status} body={answer_sdp[:500]}"
+                            )
+                            logger.error(
+                                "WHIP failed status=%s body=%s (attempt %d/%d)",
+                                response.status, answer_sdp[:500], attempt, retries,
+                            )
+                            await pc.close()
+                            self.pcs.discard(pc)
+                        else:
+                            logger.info(
+                                "WHIP ok status=%s answer_len=%d",
+                                response.status, len(answer_sdp),
+                            )
+                            await pc.setRemoteDescription(
+                                RTCSessionDescription(sdp=answer_sdp, type="answer")
+                            )
+                            return
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                ConnectionError,
+                OSError,
+            ) as error:
+                last_error = error
+                logger.warning(
+                    "WHIP request error: %s (attempt %d/%d)",
+                    error, attempt, retries,
+                )
                 await pc.close()
                 self.pcs.discard(pc)
 
-        from server.webrtc import HumanPlayer
-        player = HumanPlayer(avatar_session)
-        pc.addTrack(player.audio)
-        pc.addTrack(player.video)
+            if attempt < retries:
+                delay = min(0.5 * (2 ** (attempt - 1)), 4.0)
+                await asyncio.sleep(delay)
 
-        # H264 优先，便于 SRS remux 成 FLV 给浏览器播放
-        _prefer_h264(pc)
-
-        await pc.setLocalDescription(await pc.createOffer())
-        logger.info("rtcpush WHIP -> %s", push_url)
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                push_url,
-                data=pc.localDescription.sdp,
-                headers={"Content-Type": "application/sdp"},
-            ) as response:
-                answer_sdp = await response.text()
-                if response.status >= 400:
-                    logger.error(
-                        "WHIP failed status=%s body=%s",
-                        response.status, answer_sdp[:500],
-                    )
-                    await pc.close()
-                    self.pcs.discard(pc)
-                    return
-                logger.info(
-                    "WHIP ok status=%s answer_len=%d",
-                    response.status, len(answer_sdp),
-                )
-
-        await pc.setRemoteDescription(
-            RTCSessionDescription(sdp=answer_sdp, type='answer')
-        )
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("WHIP failed after retries")
 
     async def shutdown(self):
         """关闭所有 PeerConnection"""

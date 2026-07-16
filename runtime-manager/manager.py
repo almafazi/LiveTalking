@@ -66,6 +66,8 @@ class RuntimeSupervisor:
             if state:
                 self.state = dict(state)
             self.stop()
+            # Let SRS release the previous WHIP publisher before a new one connects.
+            time.sleep(float(os.getenv("LIVETALKING_RESTART_COOLDOWN", "2")))
             command = COMMAND_TEMPLATE.format(**self.state)
             self.child = subprocess.Popen(shlex.split(command), cwd=ROOT)
 
@@ -81,6 +83,8 @@ class RuntimeSupervisor:
                 self.child.kill()
                 self.child.wait(timeout=10)
             self.child = None
+            # Brief pause so SRS can drop the old livestream publisher.
+            time.sleep(float(os.getenv("LIVETALKING_STOP_COOLDOWN", "1")))
 
     def process_avatar(self, task_id, payload):
         task = self.jobs[task_id]
@@ -105,7 +109,11 @@ class RuntimeSupervisor:
             if model != "wav2lip":
                 raise ValueError("Only wav2lip is enabled in v1")
             params = payload.get("parameters") or {}
-            pads = str(params.get("pads", "0 10 0 0")).split()
+            raw_pads = params.get("pads", "0 10 0 0")
+            if isinstance(raw_pads, (list, tuple)):
+                pads = [str(part) for part in raw_pads]
+            else:
+                pads = str(raw_pads).split()
             command = [
                 os.getenv("LIVETALKING_PYTHON", str(ROOT / ".venv" / "bin" / "python")),
                 "-m", "avatars.wav2lip.genavatar",
@@ -127,8 +135,13 @@ class RuntimeSupervisor:
                 archive.add(AVATARS_DIR / avatar_id, arcname=avatar_id)
             checksum = self._sha256(artifact)
             if payload.get("artifact_upload_url"):
-                headers = payload.get("artifact_upload_headers") or {}
-                request = Request(payload["artifact_upload_url"], data=artifact.read_bytes(), headers=headers, method="PUT")
+                headers = self._normalize_headers(payload.get("artifact_upload_headers") or {})
+                request = Request(
+                    payload["artifact_upload_url"],
+                    data=artifact.read_bytes(),
+                    headers=headers,
+                    method="PUT",
+                )
                 with urlopen(request, timeout=300) as response:
                     if response.status >= 400:
                         raise RuntimeError(f"artifact upload failed: HTTP {response.status}")
@@ -220,6 +233,24 @@ class RuntimeSupervisor:
         request = Request(url, headers={"User-Agent": "LiveTalking-Runtime-Manager/1.0"})
         with urlopen(request, timeout=300) as response, open(destination, "wb") as output:
             shutil.copyfileobj(response, output)
+
+    @staticmethod
+    def _normalize_headers(headers):
+        """Coerce Laravel/S3 temporaryUploadUrl headers into str->str for urllib."""
+        if not headers:
+            return {}
+        if not isinstance(headers, dict):
+            raise TypeError(f"artifact_upload_headers must be a dict, got {type(headers).__name__}")
+        normalized = {}
+        for key, value in headers.items():
+            if value is None:
+                continue
+            if isinstance(value, (list, tuple)):
+                if not value:
+                    continue
+                value = value[0]
+            normalized[str(key)] = value if isinstance(value, (str, bytes)) else str(value)
+        return normalized
 
     @staticmethod
     def _sha256(path):
