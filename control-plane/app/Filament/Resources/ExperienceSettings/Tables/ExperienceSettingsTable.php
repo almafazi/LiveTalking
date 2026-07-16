@@ -29,7 +29,10 @@ class ExperienceSettingsTable
             ->recordActions([
                 Action::make('publish')->label('Publish')->icon('heroicon-o-rocket-launch')
                     ->color('success')->requiresConfirmation()
-                    ->action(fn ($record) => PublishExperience::dispatch($record->id)),
+                    ->successNotificationTitle('Publish queued')
+                    ->action(function ($record) {
+                        PublishExperience::dispatch($record->id);
+                    }),
                 EditAction::make(),
             ])
             ->toolbarActions([

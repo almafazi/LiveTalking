@@ -35,7 +35,7 @@ services:
     environment:
       RUNTIME_PUBLIC_URL: ${RUNTIME_PUBLIC_URL}
     ports:
-      - "127.0.0.1:8080:80"
+      - "127.0.0.1:18080:80"
     depends_on:
       - app
     restart: unless-stopped
