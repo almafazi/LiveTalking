@@ -1,5 +1,10 @@
 # LiveTalking — Workflow (Vast.ai + rtcpush + SRS)
 
+> Runbook ini berisi detail troubleshooting GPU, model, dan transport pada
+> instance Vast. Untuk deployment production lengkap yang memasangkan Vast.ai
+> dengan Laravel di aaPanel, gunakan
+> [`docs/deployment-aapanel-vast.md`](docs/deployment-aapanel-vast.md).
+
 Runbook agar **musetalk / wav2lip** langsung jalan di instance ini (fork `almafazi/LiveTalking`).
 
 ## Ringkas: start ulang (sudah terpasang)

@@ -20,6 +20,7 @@ workspace/log_ngp.txt
 *.log
 dist
 .env
+.env.runtime
 .kilo/
 browser-test-*.png
 .venv

@@ -1,5 +1,9 @@
 # LiveTalking monorepo control plane
 
+For the complete production procedure using aaPanel for the control plane and
+Vast.ai for the GPU runtime, see
+[`deployment-aapanel-vast.md`](deployment-aapanel-vast.md).
+
 The repository now contains three cooperating parts:
 
 - The existing Python/GPU runtime at the repository root.
