@@ -137,7 +137,7 @@ function InteractiveExperience() {
     const activeLabels = labels[language] || labels.ms;
     return (
         <main className="experience" data-background={config.background} style={{ '--accent': config.accent_color }}>
-            <div className="studio"><div className="brand">{config.logo_url ? <img src={config.logo_url} alt={config.brand_name} /> : config.brand_name}</div><div className="floor" /></div>
+            <div className="studio"><div className="floor" /></div>
             <video ref={videoRef} autoPlay playsInline muted={muted} className="avatarVideo" onLoadedMetadata={updateEdgeFade} onResize={updateEdgeFade} />
             <button className="roundButton mute" onClick={() => setMuted(!muted)} aria-label="Mute">{muted ? <VolumeX /> : <Volume2 />}</button>
             <button className="roundButton reload" onClick={() => window.location.reload()} aria-label="Reload"><RefreshCw /></button>

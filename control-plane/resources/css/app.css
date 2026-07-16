@@ -10,8 +10,6 @@ button, input { font: inherit; }
 .experience[data-background='green'] .studio { background: radial-gradient(circle at 48% 28%, #168b4b, #062718 58%, #021108); }
 .experience[data-background='white'] .studio { background: radial-gradient(circle at 48% 28%, #fff, #e7e4f2 64%, #c9c3df); }
 .floor { position: absolute; inset: auto 0 0; height: 38%; background: radial-gradient(55% 100% at 48% 100%, color-mix(in srgb, var(--accent) 38%, transparent), transparent 70%); }
-.brand { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); z-index: 2; font-size: clamp(1.1rem, 2vw, 1.6rem); font-weight: 900; letter-spacing: .35em; color: rgba(255,255,255,.55); white-space: nowrap; }
-.brand img { max-width: min(46vw, 520px); max-height: 48px; object-fit: contain; opacity: .8; }
 .avatarVideo { position: absolute; z-index: 1; inset: 0 22vw 0 0; width: calc(100% - 22vw); height: 100%; object-fit: contain; object-position: center bottom; -webkit-mask-image: linear-gradient(90deg, transparent var(--edge, 0px), #000 calc(var(--edge, 0px) + 56px), #000 calc(100% - var(--edge, 0px) - 56px), transparent calc(100% - var(--edge, 0px))); mask-image: linear-gradient(90deg, transparent var(--edge, 0px), #000 calc(var(--edge, 0px) + 56px), #000 calc(100% - var(--edge, 0px) - 56px), transparent calc(100% - var(--edge, 0px))); }
 .controls { position: absolute; z-index: 4; top: 50%; right: 24px; transform: translateY(-50%); width: min(28vw, 310px); display: flex; flex-direction: column; align-items: center; gap: 14px; }
 .languages { display: flex; gap: 4px; padding: 4px; border-radius: 999px; background: rgba(7,7,12,.45); backdrop-filter: blur(14px); }
@@ -37,7 +35,6 @@ button, input { font: inherit; }
 @media (max-width: 760px) {
     .avatarVideo { inset: 0; width: 100%; height: 72%; }
     .controls { top: auto; bottom: max(20px, env(safe-area-inset-bottom)); right: 50%; transform: translateX(50%); width: min(90vw, 440px); gap: 9px; }
-    .brand { top: 12px; font-size: 1.1rem; }
     .micButton { width: 62px; height: 62px; }
     .mute { top: 14px; right: 14px; }
 }
