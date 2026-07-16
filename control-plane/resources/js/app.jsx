@@ -72,6 +72,21 @@ function InteractiveExperience() {
 
     useEffect(() => () => conversationRef.current?.stop(), []);
 
+    // The stream is pillarboxed by object-fit: contain, so the CSS edge fade must
+    // start where the video content actually ends, not at the element border.
+    function updateEdgeFade() {
+        const video = videoRef.current;
+        if (!video || !video.videoWidth || !video.videoHeight) return;
+        const rect = video.getBoundingClientRect();
+        const contentWidth = Math.min(rect.width, rect.height * (video.videoWidth / video.videoHeight));
+        video.style.setProperty('--edge', `${Math.max(0, (rect.width - contentWidth) / 2)}px`);
+    }
+
+    useEffect(() => {
+        window.addEventListener('resize', updateEdgeFade);
+        return () => window.removeEventListener('resize', updateEdgeFade);
+    }, []);
+
     async function toggleConversation() {
         if (conversationRef.current) {
             conversationRef.current.stop();
@@ -123,7 +138,7 @@ function InteractiveExperience() {
     return (
         <main className="experience" data-background={config.background} style={{ '--accent': config.accent_color }}>
             <div className="studio"><div className="brand">{config.logo_url ? <img src={config.logo_url} alt={config.brand_name} /> : config.brand_name}</div><div className="floor" /></div>
-            <video ref={videoRef} autoPlay playsInline muted={muted} className="avatarVideo" />
+            <video ref={videoRef} autoPlay playsInline muted={muted} className="avatarVideo" onLoadedMetadata={updateEdgeFade} onResize={updateEdgeFade} />
             <button className="roundButton mute" onClick={() => setMuted(!muted)} aria-label="Mute">{muted ? <VolumeX /> : <Volume2 />}</button>
             <button className="roundButton reload" onClick={() => window.location.reload()} aria-label="Reload"><RefreshCw /></button>
             <aside className="controls">
