@@ -5,12 +5,13 @@
 body { margin: 0; min-width: 320px; min-height: 100vh; overflow: hidden; }
 button, input { font: inherit; }
 .experience { --accent: #a855f7; position: relative; min-height: 100svh; overflow: hidden; background: #160622; }
-.studio { position: absolute; inset: 0; background: radial-gradient(90% 72% at 48% 28%, color-mix(in srgb, var(--accent) 52%, transparent), transparent 62%), linear-gradient(180deg, #210832, #310d49 52%, #150820); }
+/* Matches the vertical ramp baked into the avatar video background (dark #301955 top -> bright #9d58e7 floor glow) so the pillarboxed stream blends in. */
+.studio { position: absolute; inset: 0; background: radial-gradient(120% 90% at 50% 62%, transparent 55%, rgba(10,4,24,.4) 100%), linear-gradient(180deg, #301955, #3d2168 34%, #442675 56%, #7841bd 82%, #9d58e7); }
 .experience[data-background='black'] .studio { background: radial-gradient(circle at 48% 28%, #41414a, #09090c 58%, #020203); }
 .experience[data-background='green'] .studio { background: radial-gradient(circle at 48% 28%, #168b4b, #062718 58%, #021108); }
 .experience[data-background='white'] .studio { background: radial-gradient(circle at 48% 28%, #fff, #e7e4f2 64%, #c9c3df); }
-.floor { position: absolute; inset: auto 0 0; height: 38%; background: radial-gradient(55% 100% at 48% 100%, color-mix(in srgb, var(--accent) 38%, transparent), transparent 70%); }
-.avatarVideo { position: absolute; z-index: 1; inset: 0 22vw 0 0; width: calc(100% - 22vw); height: 100%; object-fit: contain; object-position: center bottom; -webkit-mask-image: linear-gradient(90deg, transparent var(--edge, 0px), #000 calc(var(--edge, 0px) + 56px), #000 calc(100% - var(--edge, 0px) - 56px), transparent calc(100% - var(--edge, 0px))); mask-image: linear-gradient(90deg, transparent var(--edge, 0px), #000 calc(var(--edge, 0px) + 56px), #000 calc(100% - var(--edge, 0px) - 56px), transparent calc(100% - var(--edge, 0px))); }
+.floor { position: absolute; inset: auto 0 0; height: 38%; background: radial-gradient(55% 100% at 48% 100%, rgba(163,105,229,.5), transparent 70%); }
+.avatarVideo { position: absolute; z-index: 1; inset: 0 22vw 0 0; width: calc(100% - 22vw); height: 100%; object-fit: contain; object-position: center bottom; -webkit-mask-image: linear-gradient(90deg, transparent var(--edge, 0px), #000 calc(var(--edge, 0px) + 110px), #000 calc(100% - var(--edge, 0px) - 110px), transparent calc(100% - var(--edge, 0px))); mask-image: linear-gradient(90deg, transparent var(--edge, 0px), #000 calc(var(--edge, 0px) + 110px), #000 calc(100% - var(--edge, 0px) - 110px), transparent calc(100% - var(--edge, 0px))); }
 .controls { position: absolute; z-index: 4; top: 50%; right: 24px; transform: translateY(-50%); width: min(28vw, 310px); display: flex; flex-direction: column; align-items: center; gap: 14px; }
 .languages { display: flex; gap: 4px; padding: 4px; border-radius: 999px; background: rgba(7,7,12,.45); backdrop-filter: blur(14px); }
 .languages button { border: 0; padding: 7px 13px; border-radius: 999px; background: transparent; color: rgba(255,255,255,.6); cursor: pointer; font-weight: 800; }
