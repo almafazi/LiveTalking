@@ -106,8 +106,8 @@ class RuntimeSupervisor:
             task["progress"] = 15
             avatar_id = self._safe_identifier(payload["avatar_id"])
             model = payload.get("model", "wav2lip")
-            if model != "wav2lip":
-                raise ValueError("Only wav2lip is enabled in v1")
+            if model not in {"wav2lip", "easywav2lip"}:
+                raise ValueError("Avatar generation supports wav2lip/easywav2lip")
             params = payload.get("parameters") or {}
             raw_pads = params.get("pads", "0 10 0 0")
             if isinstance(raw_pads, (list, tuple)):

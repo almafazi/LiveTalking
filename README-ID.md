@@ -32,6 +32,9 @@ Setelah semua service hidup, buka:
 Model Wav2Lip harus tersedia di `models/wav2lip.pth`, sedangkan avatar bawaan
 berada di `data/avatars/wav2lip256_avatar1`.
 
+Pilihan model tambahan `easywav2lip` dan `ernerf` dijelaskan di
+[`docs/models-easywav2lip-ernerf.md`](docs/models-easywav2lip-ernerf.md).
+
 ## Setup pertama kali
 
 Jalankan dari root repository:

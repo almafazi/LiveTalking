@@ -81,6 +81,11 @@ def build_avatar_session(sessionid:str, params:dict)->BaseAvatar:
     opt_this.avatar_id = avatar_id
     ref_audio = params.get('refaudio','') #音色
     ref_text = params.get('reftext','')
+    if opt.model == 'ernerf' and avatar_id != opt.avatar_id:
+        raise ValueError(
+            "ER-NeRF subject is fixed at startup; restart with another "
+            "--ernerf_path to change avatar"
+        )
     if (avatar_id and avatar_id != opt.avatar_id):
         # Avoid reloading if already cached globally
         if avatar_id not in global_avatars:
@@ -132,7 +137,9 @@ def main():
     _avatar_modules = {
         'musetalk':   'avatars.musetalk_avatar',
         'wav2lip':    'avatars.wav2lip_avatar',
+        'easywav2lip': 'avatars.easywav2lip_avatar',
         'ultralight': 'avatars.ultralight_avatar',
+        'ernerf':     'avatars.ernerf_avatar',
     }
     import importlib
     avatar_mod = importlib.import_module(_avatar_modules[opt.model])
@@ -145,7 +152,7 @@ def main():
         model = load_model()
         global_avatars[opt.avatar_id] = load_avatar(opt.avatar_id) 
         warm_up(opt.batch_size,model)      
-    elif opt.model == 'wav2lip':
+    elif opt.model in ('wav2lip', 'easywav2lip'):
         model = load_model("./models/wav2lip.pth")
         global_avatars[opt.avatar_id] = load_avatar(opt.avatar_id)
         warm_up(opt.batch_size,model,256)
@@ -153,6 +160,10 @@ def main():
         model = load_model(opt)
         global_avatars[opt.avatar_id] = load_avatar(opt.avatar_id)
         warm_up(opt.batch_size,global_avatars[opt.avatar_id],160)
+    elif opt.model == 'ernerf':
+        model = load_model(opt)
+        global_avatars[opt.avatar_id] = load_avatar(opt)
+        warm_up(opt.batch_size, model)
 
     # init rtc manager
     session_manager.set_max_session(opt.max_session)

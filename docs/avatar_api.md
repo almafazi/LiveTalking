@@ -14,7 +14,7 @@ POST /api/avatar/task
 
 | 参数 | 必填 | 类型 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `model` | 是 | string | — | 模型类型：`wav2lip` / `musetalk` |
+| `model` | 是 | string | — | 模型类型：`wav2lip` / `easywav2lip` / `musetalk` |
 | `avatar_id` | 是 | string | — | Avatar 唯一标识符 |
 | `video_file` | 否 | file | — | 上传的视频文件（multipart），保存到 `./data/tmp/` |
 | `video_path` | 条件 | string | — | 视频文件本地路径（未上传 `video_file` 时必填） |
@@ -134,6 +134,7 @@ DELETE /api/avatar/task/{task_id}
 | model | 专有参数 | 生成模块 |
 |-------|----------|----------|
 | `wav2lip` | `face_det_batch_size`, `pads`, `nosmooth`, `img_size`, `teeth_suppression` | `avatars/wav2lip/genavatar.py` |
+| `easywav2lip` | 与 `wav2lip` 相同；运行时使用柔化嘴部融合 | `avatars/wav2lip/genavatar.py` |
 | `musetalk` | `bbox_shift`, `extra_margin`, `parsing_mode`, `version` | `avatars/musetalk/genavatar.py` |
 
 ## 生成输出

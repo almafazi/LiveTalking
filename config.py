@@ -59,12 +59,43 @@ def parse_args():
 
     # ─── 数字人模型 ────────────────────────────────────────────────────
     parser.add_argument('--model', type=str, default='wav2lip',
-                        help="avatar model: musetalk/wav2lip/ultralight")
+                        choices=('musetalk', 'wav2lip', 'easywav2lip', 'ultralight', 'ernerf'),
+                        help="avatar model")
     parser.add_argument('--avatar_id', type=str, default='wav2lip256_avatar1',
                         help="avatar id in data/avatars")
     parser.add_argument('--batch_size', type=int, default=16, help="infer batch")
     parser.add_argument('--modelres', type=int, default=256)
     parser.add_argument('--modelfile', type=str, default='')
+
+    # Easy-Wav2Lip-inspired realtime compositing. These values are relative to
+    # the detected face crop; the generated pixels outside the mask are kept
+    # from the original avatar frame.
+    parser.add_argument('--easywav2lip_feather', type=int, default=21,
+                        help="odd Gaussian kernel used to soften the mouth mask")
+    parser.add_argument('--easywav2lip_mouth_width', type=float, default=0.72,
+                        help="mouth blend width relative to the face crop")
+    parser.add_argument('--easywav2lip_mouth_height', type=float, default=0.36,
+                        help="mouth blend height relative to the face crop")
+
+    # ER-NeRF stays in its own checkout/environment because its CUDA extension
+    # and PyTorch requirements conflict with the lightweight avatar engines.
+    parser.add_argument('--ernerf_root', type=str, default='',
+                        help="path to an external Fictionarry/ER-NeRF checkout")
+    parser.add_argument('--ernerf_path', type=str, default='',
+                        help="preprocessed ER-NeRF subject directory")
+    parser.add_argument('--ernerf_workspace', type=str, default='',
+                        help="trained ER-NeRF workspace containing checkpoints")
+    parser.add_argument('--ernerf_pose', type=str, default='',
+                        help="pose JSON; defaults to <ernerf_path>/transforms_train.json")
+    parser.add_argument('--ernerf_au', type=str, default='',
+                        help="eye-area CSV; defaults to <ernerf_path>/au.csv")
+    parser.add_argument('--ernerf_asr_model', type=str,
+                        default='facebook/hubert-large-ls960-ft',
+                        help="realtime audio feature model; must match ER-NeRF training")
+    parser.add_argument('--ernerf_att', type=int, choices=(0, 1, 2), default=2,
+                        help="ER-NeRF audio attention mode")
+    parser.add_argument('--ernerf_torso', action='store_true',
+                        help="render the trained ER-NeRF torso model")
 
     # ─── 自定义动作和多形象 ────────────────────────────────────────────
     parser.add_argument('--customvideo_config', type=str, default='',

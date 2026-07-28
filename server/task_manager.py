@@ -98,7 +98,7 @@ class TaskManager:
                     version=task.params.get('version', 'v15'),
                     progress_callback=progress_callback
                 )
-            elif task.model_type == "wav2lip":
+            elif task.model_type in {"wav2lip", "easywav2lip"}:
                 from avatars.wav2lip.genavatar import generate_avatar
                 generate_avatar(
                     video_path=task.params['video_path'],

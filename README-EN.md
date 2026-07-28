@@ -34,6 +34,9 @@ Domestic Mirror: <https://gitee.com/lipku/LiveTalking>
 8. Supports custom digital human avatars
 9. Provides frontend API integration
 
+The optional Easy-Wav2Lip realtime blend and external ER-NeRF adapter are
+documented in [docs/models-easywav2lip-ernerf.md](docs/models-easywav2lip-ernerf.md).
+
 ---
 
 ## Usage Scenarios

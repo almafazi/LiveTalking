@@ -9,10 +9,25 @@ m: 8
 r: 10
 
 # -------- Avatar Model ----------------------------------------------------------
-model: wav2lip                 # musetalk / wav2lip / ultralight
+model: wav2lip                 # musetalk / wav2lip / easywav2lip / ultralight / ernerf
 avatar_id: wav2lip256_avatar1
 batch_size: 16
 modelres: 256
+
+# Easy-Wav2Lip realtime mouth blending
+easywav2lip_feather: 21
+easywav2lip_mouth_width: 0.72
+easywav2lip_mouth_height: 0.36
+
+# ER-NeRF (use a dedicated ER-NeRF-compatible venv/container)
+ernerf_root: ''               # e.g. /workspace/ER-NeRF
+ernerf_path: ''               # e.g. /workspace/ER-NeRF/data/obama
+ernerf_workspace: ''          # e.g. /workspace/ER-NeRF/trial_obama_torso
+ernerf_pose: ''               # defaults to <ernerf_path>/transforms_train.json
+ernerf_au: ''                 # defaults to <ernerf_path>/au.csv
+ernerf_asr_model: facebook/hubert-large-ls960-ft
+ernerf_att: 2
+ernerf_torso: false
 
 # -------- Custom Actions ----------------------------------------------------------
 customvideo_config: ''
