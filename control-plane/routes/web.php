@@ -2,4 +2,6 @@
 
 use Illuminate\Support\Facades\Route;
 
-Route::view('/{path?}', 'app')->where('path', '^(?!admin|api|up|storage).*$');
+Route::get('/{path?}', function () {
+    return view(env('ONLY_EMBED') ? 'embed' : 'app');
+})->where('path', '^(?!admin|api|up|storage).*$');
