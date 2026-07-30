@@ -9,9 +9,8 @@ const labels = {
     en: { idle: 'Tap to talk', connecting: 'Preparing voice…', listening: 'I am listening…', thinking: 'Thinking…', speaking: 'Speaking…', placeholder: 'Speak or type your question…' },
 };
 
-function InteractiveExperience() {
+function InteractiveExperience({ onlyEmbed }) {
     const videoRef = useRef(null);
-    const playerRef = useRef(null);
     const conversationRef = useRef(null);
     const [config, setConfig] = useState(null);
     const [language, setLanguage] = useState('ms');
@@ -29,7 +28,7 @@ function InteractiveExperience() {
     useEffect(() => { loadConfig().catch((e) => setError(e.message)); }, []);
 
     useEffect(() => {
-        if (!config || config.maintenance) return undefined;
+        if (onlyEmbed || !config || config.maintenance) return undefined;
         let cancelled = false;
         let peer;
         let fallback;
@@ -64,11 +63,15 @@ function InteractiveExperience() {
             peer?.close();
             fallback?.destroy();
         };
-    }, [config?.revision, config?.maintenance]);
+    }, [onlyEmbed, config?.revision, config?.maintenance]);
 
     useEffect(() => {
-        if (videoRef.current) videoRef.current.muted = muted;
-    }, [muted]);
+        if (onlyEmbed) {
+            conversationRef.current?.setMuted(muted);
+        } else if (videoRef.current) {
+            videoRef.current.muted = muted;
+        }
+    }, [onlyEmbed, muted]);
 
     useEffect(() => () => conversationRef.current?.stop(), []);
 
@@ -97,21 +100,25 @@ function InteractiveExperience() {
 
         setError('');
         setVoiceState('connecting');
+        let client;
         try {
             const response = await fetch('/api/public/conversation', {
                 method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content },
             });
             const payload = await response.json();
             if (!response.ok) throw new Error(payload.message || 'Conversation bootstrap failed.');
-            const client = new ConversationClient({
+            client = new ConversationClient({
                 ...payload.data,
                 language,
+                playbackMode: onlyEmbed ? 'browser' : 'avatar',
+                muted,
                 onState: setVoiceState,
                 onError: (message) => setError(message),
             });
             conversationRef.current = client;
             await client.start();
         } catch (e) {
+            client?.stop();
             conversationRef.current = null;
             setVoiceState('idle');
             setError(e.message);
@@ -136,9 +143,24 @@ function InteractiveExperience() {
 
     const activeLabels = labels[language] || labels.ms;
     return (
-        <main className="experience" data-background={config.background} style={{ '--accent': config.accent_color }}>
+        <main
+            className="experience"
+            data-background={onlyEmbed ? 'white' : config.background}
+            data-static-avatar={onlyEmbed ? 'true' : 'false'}
+            style={{ '--accent': config.accent_color }}
+        >
             <div className="studio"><div className="floor" /></div>
-            <video ref={videoRef} autoPlay playsInline muted={muted} className="avatarVideo" onLoadedMetadata={updateEdgeFade} onResize={updateEdgeFade} />
+            <video
+                ref={videoRef}
+                src={onlyEmbed ? '/dummy.mp4' : undefined}
+                autoPlay
+                loop={onlyEmbed}
+                playsInline
+                muted={onlyEmbed || muted}
+                className="avatarVideo"
+                onLoadedMetadata={updateEdgeFade}
+                onResize={updateEdgeFade}
+            />
             <button className="roundButton mute" onClick={() => setMuted(!muted)} aria-label="Mute">{muted ? <VolumeX /> : <Volume2 />}</button>
             <button className="roundButton reload" onClick={() => window.location.reload()} aria-label="Reload"><RefreshCw /></button>
             <aside className="controls">
@@ -152,4 +174,5 @@ function InteractiveExperience() {
     );
 }
 
-createRoot(document.getElementById('app')).render(<InteractiveExperience />);
+const appRoot = document.getElementById('app');
+createRoot(appRoot).render(<InteractiveExperience onlyEmbed={appRoot.dataset.onlyEmbed === 'true'} />);

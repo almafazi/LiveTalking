@@ -38,7 +38,7 @@ return [
     'elevenlabs' => [
         'base_url' => env('ELEVENLABS_BASE_URL', 'https://api.elevenlabs.io/v1'),
         'api_key' => env('ELEVENLABS_API_KEY'),
-        'agent_id' => env('ELEVENLABS_AGENT_ID'),
+        'agent_id' => env('ELEVENLABS_AGENT_ID', 'agent_4701kysfb37vey8t18rg3s616dqw'),
     ],
 
     'runtime' => [

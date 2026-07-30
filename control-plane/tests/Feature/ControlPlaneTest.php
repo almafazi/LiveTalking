@@ -31,6 +31,7 @@ class ControlPlaneTest extends TestCase
     public function test_conversation_bootstrap_combines_provider_and_runtime_tokens(): void
     {
         ExperienceSetting::current();
+        config()->set('app.only_embed', false);
         config()->set('services.elevenlabs.api_key', 'test-key');
         config()->set('services.elevenlabs.agent_id', 'agent-test');
         config()->set('services.runtime.token', 'runtime-test');
@@ -46,6 +47,31 @@ class ControlPlaneTest extends TestCase
             ->assertOk()
             ->assertJsonPath('data.signed_url', 'wss://example.test/conversation')
             ->assertJsonPath('data.control_token', 'control-test');
+    }
+
+    public function test_only_embed_mode_uses_react_ui_and_skips_runtime_bootstrap(): void
+    {
+        ExperienceSetting::current();
+        config()->set('app.only_embed', true);
+        config()->set('services.elevenlabs.api_key', 'test-key');
+        config()->set('services.elevenlabs.agent_id', 'agent-test');
+
+        Http::fake([
+            'https://api.elevenlabs.io/*' => Http::response(['signed_url' => 'wss://example.test/conversation']),
+        ]);
+
+        $this->get('/')
+            ->assertOk()
+            ->assertSee('data-only-embed="true"', false)
+            ->assertDontSee('elevenlabs-convai', false);
+
+        $this->postJson('/api/public/conversation')
+            ->assertOk()
+            ->assertJsonPath('data.signed_url', 'wss://example.test/conversation')
+            ->assertJsonMissingPath('data.control_token');
+
+        Http::assertSentCount(1);
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/internal/audio-sessions'));
     }
 
     public function test_authenticated_admin_resources_render(): void

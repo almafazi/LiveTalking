@@ -54,6 +54,8 @@ return [
 
     'url' => env('APP_URL', 'http://localhost'),
 
+    'only_embed' => (bool) env('ONLY_EMBED', false),
+
     /*
     |--------------------------------------------------------------------------
     | Application Timezone
