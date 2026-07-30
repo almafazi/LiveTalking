@@ -152,7 +152,7 @@ function InteractiveExperience({ onlyEmbed }) {
             <div className="studio"><div className="floor" /></div>
             <video
                 ref={videoRef}
-                src={onlyEmbed ? '/dummy.mp4' : undefined}
+                src={onlyEmbed ? 'https://storage.aurora-mc-ai.online/video/dummy.mp4' : undefined}
                 autoPlay
                 loop={onlyEmbed}
                 playsInline
