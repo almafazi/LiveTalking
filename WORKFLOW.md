@@ -138,6 +138,69 @@ cp /tmp/lt-models/wav2lip256.pth /workspace/LiveTalking/models/wav2lip.pth
 tar -xzf /tmp/lt-models/wav2lip256_avatar1.tar.gz -C /workspace/LiveTalking/data/avatars/
 ```
 
+### Normalisasi video sumber avatar
+
+Sebelum menjalankan **Process avatar** dari control-plane, normalisasikan video
+sumber agar sesuai dengan pipeline LiveTalking. Untuk satu session Wav2Lip atau
+Easy-Wav2Lip, titik awal yang direkomendasikan adalah:
+
+```text
+Resolusi       720x1280 (portrait)
+Frame rate     CFR 25 FPS
+Pixel format   yuv420p
+Video codec    H.264
+Audio          tidak diperlukan
+```
+
+Contoh konversi:
+
+```bash
+ffmpeg -y -i input.mp4 \
+  -vf "fps=25,scale=720:1280:flags=lanczos" \
+  -an \
+  -c:v libx264 \
+  -preset fast \
+  -crf 18 \
+  -pix_fmt yuv420p \
+  -movflags +faststart \
+  avatar-optimized.mp4
+```
+
+Untuk sumber yang bukan rasio portrait 9:16, pertahankan aspect ratio dan beri
+padding agar gambar tidak terdistorsi:
+
+```bash
+ffmpeg -y -i input.mp4 \
+  -vf "fps=25,scale=720:1280:force_original_aspect_ratio=decrease:flags=lanczos,pad=720:1280:(ow-iw)/2:(oh-ih)/2" \
+  -an \
+  -c:v libx264 -preset fast -crf 18 \
+  -pix_fmt yuv420p -movflags +faststart \
+  avatar-optimized.mp4
+```
+
+Validasi file sebelum di-upload ke admin. Jangan hanya mengandalkan metadata;
+pastikan seluruh frame dapat didekode:
+
+```bash
+ffprobe -v error \
+  -show_entries stream=width,height,avg_frame_rate,nb_frames \
+  -show_entries format=duration,size \
+  -of json avatar-optimized.mp4
+
+ffmpeg -v error -i avatar-optimized.mp4 -map 0:v:0 -f null -
+```
+
+Menurunkan 1080x1920 menjadi 720x1280 mengurangi jumlah piksel sekitar 56%.
+Ini meringankan copy frame, compositing wajah, encoding H.264, bandwidth FLV,
+dan decoding browser. CFR 25 juga menyamakan frame rate sumber dengan default
+LiveTalking sehingga pacing lebih konsisten.
+
+Normalisasi tidak dapat menciptakan gerakan baru. Jika video sumber sering diam
+atau hanya memiliki perubahan yang sangat kecil, avatar tetap dapat terlihat
+pause walaupun server mengirim 25 FPS. Gunakan video 15-30 detik dengan gerakan
+kepala/badan kecil tetapi berkelanjutan, tanpa berhenti lama pada satu pose, dan
+usahakan pose awal serta akhir serupa agar loop maju-mundur terlihat mulus.
+
 ---
 
 ## Ganti model (musetalk ↔ wav2lip)
