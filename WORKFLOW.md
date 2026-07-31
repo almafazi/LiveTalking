@@ -138,6 +138,69 @@ cp /tmp/lt-models/wav2lip256.pth /workspace/LiveTalking/models/wav2lip.pth
 tar -xzf /tmp/lt-models/wav2lip256_avatar1.tar.gz -C /workspace/LiveTalking/data/avatars/
 ```
 
+### Normalisasi video sumber avatar
+
+Sebelum menjalankan **Process avatar** dari control-plane, normalisasikan video
+sumber agar sesuai dengan pipeline LiveTalking. Untuk satu session Wav2Lip atau
+Easy-Wav2Lip, titik awal yang direkomendasikan adalah:
+
+```text
+Resolusi       720x1280 (portrait)
+Frame rate     CFR 25 FPS
+Pixel format   yuv420p
+Video codec    H.264
+Audio          tidak diperlukan
+```
+
+Contoh konversi:
+
+```bash
+ffmpeg -y -i input.mp4 \
+  -vf "fps=25,scale=720:1280:flags=lanczos" \
+  -an \
+  -c:v libx264 \
+  -preset fast \
+  -crf 18 \
+  -pix_fmt yuv420p \
+  -movflags +faststart \
+  avatar-optimized.mp4
+```
+
+Untuk sumber yang bukan rasio portrait 9:16, pertahankan aspect ratio dan beri
+padding agar gambar tidak terdistorsi:
+
+```bash
+ffmpeg -y -i input.mp4 \
+  -vf "fps=25,scale=720:1280:force_original_aspect_ratio=decrease:flags=lanczos,pad=720:1280:(ow-iw)/2:(oh-ih)/2" \
+  -an \
+  -c:v libx264 -preset fast -crf 18 \
+  -pix_fmt yuv420p -movflags +faststart \
+  avatar-optimized.mp4
+```
+
+Validasi file sebelum di-upload ke admin. Jangan hanya mengandalkan metadata;
+pastikan seluruh frame dapat didekode:
+
+```bash
+ffprobe -v error \
+  -show_entries stream=width,height,avg_frame_rate,nb_frames \
+  -show_entries format=duration,size \
+  -of json avatar-optimized.mp4
+
+ffmpeg -v error -i avatar-optimized.mp4 -map 0:v:0 -f null -
+```
+
+Menurunkan 1080x1920 menjadi 720x1280 mengurangi jumlah piksel sekitar 56%.
+Ini meringankan copy frame, compositing wajah, encoding H.264, bandwidth FLV,
+dan decoding browser. CFR 25 juga menyamakan frame rate sumber dengan default
+LiveTalking sehingga pacing lebih konsisten.
+
+Normalisasi tidak dapat menciptakan gerakan baru. Jika video sumber sering diam
+atau hanya memiliki perubahan yang sangat kecil, avatar tetap dapat terlihat
+pause walaupun server mengirim 25 FPS. Gunakan video 15-30 detik dengan gerakan
+kepala/badan kecil tetapi berkelanjutan, tanpa berhenti lama pada satu pose, dan
+usahakan pose awal serta akhir serupa agar loop maju-mundur terlihat mulus.
+
 ---
 
 ## Ganti model (musetalk ↔ wav2lip)
@@ -257,6 +320,99 @@ curl -s -X POST http://127.0.0.1:8010/human \
 tail -f /var/log/portal/livetalking.log
 # cari: WHIP ok, Connection state is connected, final fps:~25
 ```
+
+---
+
+## Troubleshooting: HTTP-FLV macet lewat control-plane / Cloudflare
+
+Jika audio tetap berjalan tetapi gambar avatar tiba-tiba berhenti pada halaman
+control-plane, periksa console browser. Gejala berikut menunjukkan koneksi
+HTTP-FLV diputus di jalur HTTP/3/QUIC, bukan masalah inference GPU:
+
+```text
+ERR_QUIC_PROTOCOL_ERROR.QUIC_PACKET_WRITE_ERROR
+Fetch stream meet Early-EOF
+UnrecoverableEarlyEof
+```
+
+Alur media pada deployment control-plane adalah:
+
+```text
+Browser
+  -> https://DOMAIN/media/srs-live/live/livestream.flv
+  -> Cloudflare / reverse proxy aaPanel
+  -> http://VAST_IP:VAST_TCP_PORT_8010/srs-live/live/livestream.flv
+  -> LiveTalking -> SRS
+```
+
+Walaupun reverse proxy meneruskan request ke Vast dengan HTTP/1.1, browser dapat
+terhubung ke Cloudflare menggunakan HTTP/3. Kegagalan QUIC pada koneksi FLV yang
+berumur panjang membuat player berhenti pada frame terakhir sementara request
+audio ElevenLabs tetap berjalan secara terpisah.
+
+### Verifikasi protokol browser
+
+Di Chrome/Edge buka **DevTools -> Network**, aktifkan kolom **Protocol**, lalu
+cari request `livestream.flv`:
+
+- `h3`: browser memakai HTTP/3/QUIC.
+- `h2`: browser memakai HTTP/2.
+- `http/1.1`: browser memakai HTTP/1.1.
+
+Cek apakah domain mengiklankan HTTP/3:
+
+```bash
+curl -sI https://DOMAIN/ | grep -i alt-svc
+```
+
+Header seperti berikut berarti HTTP/3 ditawarkan kepada browser:
+
+```text
+alt-svc: h3=":443"; ma=86400
+```
+
+### Mitigasi Cloudflare
+
+Matikan **Network -> HTTP/3 (with QUIC)** untuk domain control-plane. Setelah
+itu tutup browser sepenuhnya atau gunakan Incognito, lakukan hard refresh, dan
+pastikan request `livestream.flv` berubah menjadi `h2`. Browser dapat menyimpan
+informasi `Alt-Svc` dari koneksi sebelumnya sehingga refresh biasa belum tentu
+langsung menghentikan penggunaan `h3`.
+
+### Konfigurasi reverse proxy media
+
+Pastikan endpoint `/media/` tidak memakai buffering atau cache proxy:
+
+```nginx
+location /media/ {
+    proxy_pass http://VAST_RUNTIME/;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_request_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    gzip off;
+    add_header X-Accel-Buffering no;
+}
+```
+
+Untuk ketahanan tambahan, player mpegts.js di control-plane sebaiknya memakai
+`enableStashBuffer: false`, `liveBufferLatencyChasing: true`, dan menyambungkan
+ulang player ketika menerima error `EarlyEof`.
+
+### Error audio ElevenLabs 409
+
+Respons berikut bukan error FLV/QUIC:
+
+```text
+/media/api/elevenlabs/audio -> HTTP 409
+```
+
+Ini berarti chunk audio dari generation lama tiba setelah interrupt/barge-in.
+Client sebaiknya membatalkan upload yang masih berjalan dan mengabaikan `409`
+untuk chunk stale. Jangan memakai error ini sebagai indikator masalah GPU atau
+stream video.
 
 ---
 

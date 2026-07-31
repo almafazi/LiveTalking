@@ -77,6 +77,7 @@ export class ConversationClient {
         this.playbackIdleTimer = null;
         this.responseComplete = false;
         this.stopped = false;
+        this.uploadAbortController = null;
     }
 
     async start() {
@@ -152,14 +153,25 @@ export class ConversationClient {
         const generation = this.generation;
         this.uploadQueue = this.uploadQueue.then(async () => {
             if (this.stopped || generation !== this.generation) return;
+            const controller = new AbortController();
+            this.uploadAbortController = controller;
             const form = new FormData();
             form.append('generation', String(generation));
             form.append('file', wavBlob(bytes, this.outputRate), 'agent.wav');
             const response = await fetch('/media/api/elevenlabs/audio', {
-                method: 'POST', headers: { 'X-LiveTalking-Token': this.control_token }, body: form,
+                method: 'POST',
+                headers: { 'X-LiveTalking-Token': this.control_token },
+                body: form,
+                signal: controller.signal,
             });
+            if (this.uploadAbortController === controller) this.uploadAbortController = null;
+            if (this.stopped || generation !== this.generation || response.status === 409) return;
             if (!response.ok) throw new Error(`Avatar audio HTTP ${response.status}`);
-        }).catch((error) => this.onError?.(error.message));
+        }).catch((error) => {
+            this.uploadAbortController = null;
+            if (error.name === 'AbortError' || this.stopped || generation !== this.generation) return;
+            this.onError?.(error.message);
+        });
     }
 
     enqueueBrowserAudio(bytes) {
@@ -232,6 +244,8 @@ export class ConversationClient {
         this.generation += 1;
         this.pcmRemainder = new Uint8Array(0);
         this.responseComplete = false;
+        this.uploadAbortController?.abort();
+        this.uploadAbortController = null;
         if (this.playbackMode === 'browser') {
             clearTimeout(this.playbackIdleTimer);
             this.playbackIdleTimer = null;
@@ -255,6 +269,8 @@ export class ConversationClient {
         this.processor?.disconnect();
         this.source?.disconnect();
         this.stream?.getTracks().forEach((track) => track.stop());
+        this.uploadAbortController?.abort();
+        this.uploadAbortController = null;
         clearTimeout(this.playbackIdleTimer);
         this.playbackIdleTimer = null;
         for (const playbackSource of this.playbackSources) {
