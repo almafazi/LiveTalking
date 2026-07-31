@@ -32,6 +32,8 @@ function InteractiveExperience({ onlyEmbed }) {
         let cancelled = false;
         let peer;
         let fallback;
+        let fallbackRetryTimer;
+        let fallbackRetryCount = 0;
 
         async function connectStream() {
             try {
@@ -50,25 +52,70 @@ function InteractiveExperience({ onlyEmbed }) {
                 await peer.setRemoteDescription({ type: 'answer', sdp: await response.text() });
             } catch (whepError) {
                 if (cancelled || !mpegts.isSupported()) throw whepError;
-                fallback = mpegts.createPlayer({ type: 'flv', isLive: true, url: config.media.flv_url });
-                fallback.attachMediaElement(videoRef.current);
-                fallback.load();
-                try {
-                    await fallback.play();
-                } catch (playError) {
-                    if (playError.name !== 'NotAllowedError' || !videoRef.current) throw playError;
-                    videoRef.current.muted = true;
-                    setMuted(true);
-                    await fallback.play();
-                }
+                await connectFallback();
             }
+        }
+
+        function destroyFallback() {
+            if (!fallback) return;
+            try {
+                fallback.off(mpegts.Events.ERROR, handleFallbackError);
+                fallback.unload();
+                fallback.detachMediaElement();
+                fallback.destroy();
+            } catch {}
+            fallback = undefined;
+        }
+
+        function liveUrl() {
+            const url = new URL(config.media.flv_url, window.location.href);
+            url.searchParams.set('_live_reconnect', String(Date.now()));
+            return url.toString();
+        }
+
+        async function connectFallback() {
+            if (cancelled || !videoRef.current) return;
+            destroyFallback();
+            fallback = mpegts.createPlayer({
+                type: 'flv',
+                isLive: true,
+                url: liveUrl(),
+            });
+            fallback.on(mpegts.Events.ERROR, handleFallbackError);
+            fallback.attachMediaElement(videoRef.current);
+            fallback.load();
+            try {
+                await fallback.play();
+                fallbackRetryCount = 0;
+            } catch (playError) {
+                if (playError.name !== 'NotAllowedError' || !videoRef.current) throw playError;
+                videoRef.current.muted = true;
+                setMuted(true);
+                await fallback.play();
+                fallbackRetryCount = 0;
+            }
+        }
+
+        function handleFallbackError(type, detail, info) {
+            if (cancelled) return;
+            console.warn('FLV stream error, reconnecting to live edge.', { type, detail, info });
+            destroyFallback();
+            const delay = Math.min(5000, 500 * (2 ** fallbackRetryCount));
+            fallbackRetryCount = Math.min(fallbackRetryCount + 1, 4);
+            clearTimeout(fallbackRetryTimer);
+            fallbackRetryTimer = setTimeout(() => {
+                connectFallback().catch((error) => {
+                    if (!cancelled) setError(`Stream tidak tersedia: ${error.message}`);
+                });
+            }, delay);
         }
 
         connectStream().catch((e) => setError(`Stream tidak tersedia: ${e.message}`));
         return () => {
             cancelled = true;
+            clearTimeout(fallbackRetryTimer);
             peer?.close();
-            fallback?.destroy();
+            destroyFallback();
         };
     }, [onlyEmbed, config?.revision, config?.maintenance]);
 
