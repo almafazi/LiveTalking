@@ -43,10 +43,16 @@ class ControlPlaneTest extends TestCase
             ]),
         ]);
 
+        $this->get('/')
+            ->assertOk()
+            ->assertSee('data-only-embed="false"', false);
+
         $this->postJson('/api/public/conversation')
             ->assertOk()
             ->assertJsonPath('data.signed_url', 'wss://example.test/conversation')
             ->assertJsonPath('data.control_token', 'control-test');
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/internal/audio-sessions'));
     }
 
     public function test_only_embed_mode_uses_react_ui_and_skips_runtime_bootstrap(): void

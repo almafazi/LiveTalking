@@ -53,7 +53,14 @@ function InteractiveExperience({ onlyEmbed }) {
                 fallback = mpegts.createPlayer({ type: 'flv', isLive: true, url: config.media.flv_url });
                 fallback.attachMediaElement(videoRef.current);
                 fallback.load();
-                await fallback.play();
+                try {
+                    await fallback.play();
+                } catch (playError) {
+                    if (playError.name !== 'NotAllowedError' || !videoRef.current) throw playError;
+                    videoRef.current.muted = true;
+                    setMuted(true);
+                    await fallback.play();
+                }
             }
         }
 
@@ -145,8 +152,9 @@ function InteractiveExperience({ onlyEmbed }) {
     return (
         <main
             className="experience"
-            data-background={onlyEmbed ? 'white' : config.background}
-            data-static-avatar={onlyEmbed ? 'true' : 'false'}
+            data-background="white"
+            data-layout="panel"
+            data-avatar-source={onlyEmbed ? 'static' : 'gpu'}
             style={{ '--accent': config.accent_color }}
         >
             <div className="studio"><div className="floor" /></div>
