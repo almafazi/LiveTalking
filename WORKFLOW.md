@@ -260,6 +260,99 @@ tail -f /var/log/portal/livetalking.log
 
 ---
 
+## Troubleshooting: HTTP-FLV macet lewat control-plane / Cloudflare
+
+Jika audio tetap berjalan tetapi gambar avatar tiba-tiba berhenti pada halaman
+control-plane, periksa console browser. Gejala berikut menunjukkan koneksi
+HTTP-FLV diputus di jalur HTTP/3/QUIC, bukan masalah inference GPU:
+
+```text
+ERR_QUIC_PROTOCOL_ERROR.QUIC_PACKET_WRITE_ERROR
+Fetch stream meet Early-EOF
+UnrecoverableEarlyEof
+```
+
+Alur media pada deployment control-plane adalah:
+
+```text
+Browser
+  -> https://DOMAIN/media/srs-live/live/livestream.flv
+  -> Cloudflare / reverse proxy aaPanel
+  -> http://VAST_IP:VAST_TCP_PORT_8010/srs-live/live/livestream.flv
+  -> LiveTalking -> SRS
+```
+
+Walaupun reverse proxy meneruskan request ke Vast dengan HTTP/1.1, browser dapat
+terhubung ke Cloudflare menggunakan HTTP/3. Kegagalan QUIC pada koneksi FLV yang
+berumur panjang membuat player berhenti pada frame terakhir sementara request
+audio ElevenLabs tetap berjalan secara terpisah.
+
+### Verifikasi protokol browser
+
+Di Chrome/Edge buka **DevTools -> Network**, aktifkan kolom **Protocol**, lalu
+cari request `livestream.flv`:
+
+- `h3`: browser memakai HTTP/3/QUIC.
+- `h2`: browser memakai HTTP/2.
+- `http/1.1`: browser memakai HTTP/1.1.
+
+Cek apakah domain mengiklankan HTTP/3:
+
+```bash
+curl -sI https://DOMAIN/ | grep -i alt-svc
+```
+
+Header seperti berikut berarti HTTP/3 ditawarkan kepada browser:
+
+```text
+alt-svc: h3=":443"; ma=86400
+```
+
+### Mitigasi Cloudflare
+
+Matikan **Network -> HTTP/3 (with QUIC)** untuk domain control-plane. Setelah
+itu tutup browser sepenuhnya atau gunakan Incognito, lakukan hard refresh, dan
+pastikan request `livestream.flv` berubah menjadi `h2`. Browser dapat menyimpan
+informasi `Alt-Svc` dari koneksi sebelumnya sehingga refresh biasa belum tentu
+langsung menghentikan penggunaan `h3`.
+
+### Konfigurasi reverse proxy media
+
+Pastikan endpoint `/media/` tidak memakai buffering atau cache proxy:
+
+```nginx
+location /media/ {
+    proxy_pass http://VAST_RUNTIME/;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_request_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    gzip off;
+    add_header X-Accel-Buffering no;
+}
+```
+
+Untuk ketahanan tambahan, player mpegts.js di control-plane sebaiknya memakai
+`enableStashBuffer: false`, `liveBufferLatencyChasing: true`, dan menyambungkan
+ulang player ketika menerima error `EarlyEof`.
+
+### Error audio ElevenLabs 409
+
+Respons berikut bukan error FLV/QUIC:
+
+```text
+/media/api/elevenlabs/audio -> HTTP 409
+```
+
+Ini berarti chunk audio dari generation lama tiba setelah interrupt/barge-in.
+Client sebaiknya membatalkan upload yang masih berjalan dan mengabaikan `409`
+untuk chunk stale. Jangan memakai error ini sebagai indikator masalah GPU atau
+stream video.
+
+---
+
 ## Troubleshooting
 
 | Gejala | Perbaikan |
