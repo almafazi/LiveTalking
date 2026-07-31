@@ -27,7 +27,6 @@ import time
 import cv2
 import glob
 import pickle
-import copy
 import json
 
 import queue
@@ -188,7 +187,7 @@ class LipReal(BaseAvatar):
 
     def paste_back_frame(self,pred_frame,idx:int):
         bbox = self.coord_list_cycle[idx]
-        combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
+        combine_frame = self.frame_list_cycle[idx].copy()
         y1, y2, x1, x2 = bbox
         processed_frame = suppress_teeth_highlights(pred_frame, self.teeth_suppression)
         res_frame = cv2.resize(processed_frame,(x2-x1,y2-y1))
