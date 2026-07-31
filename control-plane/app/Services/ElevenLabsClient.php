@@ -32,7 +32,7 @@ class ElevenLabsClient
                 'tts' => [
                     'voice_id' => $voiceId,
                     'model_id' => $modelId,
-                    'agent_output_audio_format' => 'pcm_24000',
+                    'agent_output_audio_format' => 'pcm_16000',
                 ],
                 'asr' => ['user_input_audio_format' => 'pcm_16000'],
             ],
