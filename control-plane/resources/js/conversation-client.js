@@ -258,6 +258,27 @@ export class ConversationClient {
             this.playbackGain.connect(this.context.destination);
         }
         this.source = this.context.createMediaStreamSource(this.stream);
+
+        if (this.context.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
+            try {
+                await this.context.audioWorklet.addModule(new URL('./pcm-capture-processor.js', import.meta.url));
+                this.processor = new AudioWorkletNode(this.context, 'pcm-capture-processor', {
+                    numberOfInputs: 1,
+                    numberOfOutputs: 0,
+                    channelCount: 1,
+                    processorOptions: { targetSampleRate: this.inputRate },
+                });
+                this.processor.port.onmessage = (event) => {
+                    if (this.socket?.readyState !== WebSocket.OPEN) return;
+                    this.socket.send(JSON.stringify({ user_audio_chunk: base64FromBytes(new Uint8Array(event.data)) }));
+                };
+                this.source.connect(this.processor);
+                return;
+            } catch (error) {
+                console.warn('AudioWorklet unavailable, using ScriptProcessor fallback.', error);
+            }
+        }
+
         this.processor = this.context.createScriptProcessor(4096, 1, 1);
         this.processor.onaudioprocess = (event) => {
             if (this.socket?.readyState !== WebSocket.OPEN) return;
@@ -311,6 +332,7 @@ export class ConversationClient {
 
     stop() {
         this.stopped = true;
+        if (this.processor?.port) this.processor.port.onmessage = null;
         this.processor?.disconnect();
         this.source?.disconnect();
         this.stream?.getTracks().forEach((track) => track.stop());
