@@ -56,7 +56,10 @@ function wavBlob(pcmBytes, sampleRate) {
     return new Blob([header, pcmBytes], { type: 'audio/wav' });
 }
 
-const AVATAR_UPLOAD_CHUNK_MS = 200;
+// Keep several EasyWav2Lip inference batches queued so normal HTTP jitter does
+// not briefly drain the avatar audio queue between ElevenLabs audio events.
+const AVATAR_UPLOAD_CHUNK_MS = 600;
+const AVATAR_IDLE_FLUSH_MS = 600;
 
 export class ConversationClient {
     constructor(options) {
@@ -74,6 +77,7 @@ export class ConversationClient {
         this.uploadQueue = Promise.resolve();
         this.generationBarrier = Promise.resolve();
         this.pcmRemainder = new Uint8Array(0);
+        this.avatarFlushTimer = null;
         this.playbackGain = null;
         this.playbackSources = new Set();
         this.nextPlaybackTime = 0;
@@ -129,9 +133,13 @@ export class ConversationClient {
             this.onState?.('speaking');
             this.enqueueAudio(bytesFromBase64(data.audio_event.audio_base_64));
         }
-        if (data.type === 'agent_response_complete' && this.playbackMode === 'browser') {
+        if (data.type === 'agent_response_complete') {
             this.responseComplete = true;
-            this.finishBrowserPlayback();
+            if (this.playbackMode === 'browser') {
+                this.finishBrowserPlayback();
+            } else {
+                this.flushAvatarAudio();
+            }
         }
         if (data.type === 'interruption') this.interrupt();
     }
@@ -146,22 +154,36 @@ export class ConversationClient {
         combined.set(this.pcmRemainder);
         combined.set(bytes, this.pcmRemainder.byteLength);
         const frameBytes = Math.max(2, Math.round(this.outputRate * 0.02) * 2);
-        const completeBytes = Math.floor(combined.byteLength / frameBytes) * frameBytes;
-        if (!completeBytes) {
-            this.pcmRemainder = combined;
-            return;
-        }
-        const completeAudio = combined.slice(0, completeBytes);
-        this.pcmRemainder = combined.slice(completeBytes);
-        const generation = this.generation;
-        const generationBarrier = this.generationBarrier;
-        const maximumChunkBytes = Math.max(
+        const targetChunkBytes = Math.max(
             frameBytes,
             Math.floor((this.outputRate * AVATAR_UPLOAD_CHUNK_MS / 1000 * 2) / frameBytes) * frameBytes,
         );
-        for (let offset = 0; offset < completeAudio.byteLength; offset += maximumChunkBytes) {
-            const chunk = completeAudio.slice(offset, Math.min(offset + maximumChunkBytes, completeAudio.byteLength));
-            this.enqueueAvatarUpload(chunk, generation, generationBarrier);
+        let offset = 0;
+        while (combined.byteLength - offset >= targetChunkBytes) {
+            this.enqueueAvatarUpload(
+                combined.slice(offset, offset + targetChunkBytes),
+                this.generation,
+                this.generationBarrier,
+            );
+            offset += targetChunkBytes;
+        }
+        this.pcmRemainder = combined.slice(offset);
+        clearTimeout(this.avatarFlushTimer);
+        this.avatarFlushTimer = this.pcmRemainder.byteLength
+            ? setTimeout(() => this.flushAvatarAudio(), AVATAR_IDLE_FLUSH_MS)
+            : null;
+    }
+
+    flushAvatarAudio() {
+        clearTimeout(this.avatarFlushTimer);
+        this.avatarFlushTimer = null;
+        if (this.playbackMode === 'browser' || !this.pcmRemainder.byteLength) return;
+        const frameBytes = Math.max(2, Math.round(this.outputRate * 0.02) * 2);
+        const completeBytes = Math.floor(this.pcmRemainder.byteLength / frameBytes) * frameBytes;
+        const finalChunk = this.pcmRemainder.slice(0, completeBytes);
+        this.pcmRemainder = new Uint8Array(0);
+        if (finalChunk.byteLength) {
+            this.enqueueAvatarUpload(finalChunk, this.generation, this.generationBarrier);
         }
     }
 
@@ -258,6 +280,8 @@ export class ConversationClient {
 
     interrupt() {
         this.generation += 1;
+        clearTimeout(this.avatarFlushTimer);
+        this.avatarFlushTimer = null;
         this.pcmRemainder = new Uint8Array(0);
         this.responseComplete = false;
         this.uploadAbortController?.abort();
@@ -292,6 +316,8 @@ export class ConversationClient {
         this.stream?.getTracks().forEach((track) => track.stop());
         this.uploadAbortController?.abort();
         this.uploadAbortController = null;
+        clearTimeout(this.avatarFlushTimer);
+        this.avatarFlushTimer = null;
         clearTimeout(this.playbackIdleTimer);
         this.playbackIdleTimer = null;
         for (const playbackSource of this.playbackSources) {
