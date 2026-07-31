@@ -39,6 +39,17 @@ class ElevenLabsClient
         ])->throw()->json();
     }
 
+    public function updateConversationDuration(): array
+    {
+        return $this->client()->patch('/convai/agents/'.$this->agentId(), [
+            'conversation_config' => [
+                'conversation' => [
+                    'max_duration_seconds' => (int) config('services.elevenlabs.max_duration_seconds'),
+                ],
+            ],
+        ])->throw()->json();
+    }
+
     public function signedUrl(): string
     {
         $response = $this->client()->get('/convai/conversation/get-signed-url', [

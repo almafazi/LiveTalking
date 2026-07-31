@@ -25,7 +25,10 @@ class AvatarForm
                             ->afterStateUpdated(fn ($state, $set) => $set('slug', Str::slug($state))),
                         TextInput::make('slug')->required()->alphaDash()->maxLength(120)
                             ->unique(ignoreRecord: true),
-                        Select::make('model')->options(['wav2lip' => 'Wav2Lip'])->default('wav2lip')->required(),
+                        Select::make('model')->options([
+                            'wav2lip' => 'Wav2Lip',
+                            'easywav2lip' => 'Easy-Wav2Lip',
+                        ])->default('wav2lip')->required(),
                         FileUpload::make('source_path')->label('Source video')
                             ->disk(config('filesystems.avatar_disk'))
                             ->directory('avatars/sources')

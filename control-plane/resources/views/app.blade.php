@@ -8,6 +8,6 @@
     @vite(['resources/css/app.css', 'resources/js/app.jsx'])
 </head>
 <body>
-    <div id="app"></div>
+    <div id="app" data-only-embed="{{ config('app.only_embed') ? 'true' : 'false' }}"></div>
 </body>
 </html>

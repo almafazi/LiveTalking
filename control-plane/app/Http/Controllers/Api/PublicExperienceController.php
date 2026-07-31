@@ -53,9 +53,13 @@ class PublicExperienceController extends Controller
         $settings = ExperienceSetting::current();
         abort_if($settings->maintenance, 503, $settings->maintenance_message ?: 'Service is in maintenance.');
 
+        $session = config('app.only_embed')
+            ? []
+            : $runtime->createAudioSession();
+
         return response()->json([
             'data' => array_merge(
-                $runtime->createAudioSession(),
+                $session,
                 ['signed_url' => $elevenLabs->signedUrl()],
             ),
         ])->header('Cache-Control', 'no-store');

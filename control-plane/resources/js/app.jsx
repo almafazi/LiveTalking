@@ -9,9 +9,8 @@ const labels = {
     en: { idle: 'Tap to talk', connecting: 'Preparing voice…', listening: 'I am listening…', thinking: 'Thinking…', speaking: 'Speaking…', placeholder: 'Speak or type your question…' },
 };
 
-function InteractiveExperience() {
+function InteractiveExperience({ onlyEmbed }) {
     const videoRef = useRef(null);
-    const playerRef = useRef(null);
     const conversationRef = useRef(null);
     const [config, setConfig] = useState(null);
     const [language, setLanguage] = useState('ms');
@@ -29,10 +28,12 @@ function InteractiveExperience() {
     useEffect(() => { loadConfig().catch((e) => setError(e.message)); }, []);
 
     useEffect(() => {
-        if (!config || config.maintenance) return undefined;
+        if (onlyEmbed || !config || config.maintenance) return undefined;
         let cancelled = false;
         let peer;
         let fallback;
+        let fallbackRetryTimer;
+        let fallbackRetryCount = 0;
 
         async function connectStream() {
             try {
@@ -51,24 +52,80 @@ function InteractiveExperience() {
                 await peer.setRemoteDescription({ type: 'answer', sdp: await response.text() });
             } catch (whepError) {
                 if (cancelled || !mpegts.isSupported()) throw whepError;
-                fallback = mpegts.createPlayer({ type: 'flv', isLive: true, url: config.media.flv_url });
-                fallback.attachMediaElement(videoRef.current);
-                fallback.load();
-                await fallback.play();
+                await connectFallback();
             }
+        }
+
+        function destroyFallback() {
+            if (!fallback) return;
+            try {
+                fallback.off(mpegts.Events.ERROR, handleFallbackError);
+                fallback.unload();
+                fallback.detachMediaElement();
+                fallback.destroy();
+            } catch {}
+            fallback = undefined;
+        }
+
+        function liveUrl() {
+            const url = new URL(config.media.flv_url, window.location.href);
+            url.searchParams.set('_live_reconnect', String(Date.now()));
+            return url.toString();
+        }
+
+        async function connectFallback() {
+            if (cancelled || !videoRef.current) return;
+            destroyFallback();
+            fallback = mpegts.createPlayer({
+                type: 'flv',
+                isLive: true,
+                url: liveUrl(),
+            });
+            fallback.on(mpegts.Events.ERROR, handleFallbackError);
+            fallback.attachMediaElement(videoRef.current);
+            fallback.load();
+            try {
+                await fallback.play();
+                fallbackRetryCount = 0;
+            } catch (playError) {
+                if (playError.name !== 'NotAllowedError' || !videoRef.current) throw playError;
+                videoRef.current.muted = true;
+                setMuted(true);
+                await fallback.play();
+                fallbackRetryCount = 0;
+            }
+        }
+
+        function handleFallbackError(type, detail, info) {
+            if (cancelled) return;
+            console.warn('FLV stream error, reconnecting to live edge.', { type, detail, info });
+            destroyFallback();
+            const delay = Math.min(5000, 500 * (2 ** fallbackRetryCount));
+            fallbackRetryCount = Math.min(fallbackRetryCount + 1, 4);
+            clearTimeout(fallbackRetryTimer);
+            fallbackRetryTimer = setTimeout(() => {
+                connectFallback().catch((error) => {
+                    if (!cancelled) setError(`Stream tidak tersedia: ${error.message}`);
+                });
+            }, delay);
         }
 
         connectStream().catch((e) => setError(`Stream tidak tersedia: ${e.message}`));
         return () => {
             cancelled = true;
+            clearTimeout(fallbackRetryTimer);
             peer?.close();
-            fallback?.destroy();
+            destroyFallback();
         };
-    }, [config?.revision, config?.maintenance]);
+    }, [onlyEmbed, config?.revision, config?.maintenance]);
 
     useEffect(() => {
-        if (videoRef.current) videoRef.current.muted = muted;
-    }, [muted]);
+        if (onlyEmbed) {
+            conversationRef.current?.setMuted(muted);
+        } else if (videoRef.current) {
+            videoRef.current.muted = muted;
+        }
+    }, [onlyEmbed, muted]);
 
     useEffect(() => () => conversationRef.current?.stop(), []);
 
@@ -97,21 +154,25 @@ function InteractiveExperience() {
 
         setError('');
         setVoiceState('connecting');
+        let client;
         try {
             const response = await fetch('/api/public/conversation', {
                 method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content },
             });
             const payload = await response.json();
             if (!response.ok) throw new Error(payload.message || 'Conversation bootstrap failed.');
-            const client = new ConversationClient({
+            client = new ConversationClient({
                 ...payload.data,
                 language,
+                playbackMode: onlyEmbed ? 'browser' : 'avatar',
+                muted,
                 onState: setVoiceState,
                 onError: (message) => setError(message),
             });
             conversationRef.current = client;
             await client.start();
         } catch (e) {
+            client?.stop();
             conversationRef.current = null;
             setVoiceState('idle');
             setError(e.message);
@@ -136,9 +197,25 @@ function InteractiveExperience() {
 
     const activeLabels = labels[language] || labels.ms;
     return (
-        <main className="experience" data-background={config.background} style={{ '--accent': config.accent_color }}>
+        <main
+            className="experience"
+            data-background="white"
+            data-layout="panel"
+            data-avatar-source={onlyEmbed ? 'static' : 'gpu'}
+            style={{ '--accent': config.accent_color }}
+        >
             <div className="studio"><div className="floor" /></div>
-            <video ref={videoRef} autoPlay playsInline muted={muted} className="avatarVideo" onLoadedMetadata={updateEdgeFade} onResize={updateEdgeFade} />
+            <video
+                ref={videoRef}
+                src={onlyEmbed ? 'https://storage.aurora-mc-ai.online/video/dummy.mp4' : undefined}
+                autoPlay
+                loop={onlyEmbed}
+                playsInline
+                muted={onlyEmbed || muted}
+                className="avatarVideo"
+                onLoadedMetadata={updateEdgeFade}
+                onResize={updateEdgeFade}
+            />
             <button className="roundButton mute" onClick={() => setMuted(!muted)} aria-label="Mute">{muted ? <VolumeX /> : <Volume2 />}</button>
             <button className="roundButton reload" onClick={() => window.location.reload()} aria-label="Reload"><RefreshCw /></button>
             <aside className="controls">
@@ -152,4 +229,5 @@ function InteractiveExperience() {
     );
 }
 
-createRoot(document.getElementById('app')).render(<InteractiveExperience />);
+const appRoot = document.getElementById('app');
+createRoot(appRoot).render(<InteractiveExperience onlyEmbed={appRoot.dataset.onlyEmbed === 'true'} />);

@@ -2,4 +2,5 @@
 
 use Illuminate\Support\Facades\Route;
 
-Route::view('/{path?}', 'app')->where('path', '^(?!admin|api|up|storage).*$');
+Route::view('/{path?}', 'app')
+    ->where('path', '^(?!admin|api|up|storage).*$');
