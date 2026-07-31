@@ -56,6 +56,8 @@ function wavBlob(pcmBytes, sampleRate) {
     return new Blob([header, pcmBytes], { type: 'audio/wav' });
 }
 
+const AVATAR_UPLOAD_CHUNK_MS = 200;
+
 export class ConversationClient {
     constructor(options) {
         Object.assign(this, options);
@@ -70,6 +72,7 @@ export class ConversationClient {
         this.muted = Boolean(options.muted);
         this.generation = Number(options.generation || 0);
         this.uploadQueue = Promise.resolve();
+        this.generationBarrier = Promise.resolve();
         this.pcmRemainder = new Uint8Array(0);
         this.playbackGain = null;
         this.playbackSources = new Set();
@@ -148,10 +151,23 @@ export class ConversationClient {
             this.pcmRemainder = combined;
             return;
         }
-        bytes = combined.slice(0, completeBytes);
+        const completeAudio = combined.slice(0, completeBytes);
         this.pcmRemainder = combined.slice(completeBytes);
         const generation = this.generation;
+        const generationBarrier = this.generationBarrier;
+        const maximumChunkBytes = Math.max(
+            frameBytes,
+            Math.floor((this.outputRate * AVATAR_UPLOAD_CHUNK_MS / 1000 * 2) / frameBytes) * frameBytes,
+        );
+        for (let offset = 0; offset < completeAudio.byteLength; offset += maximumChunkBytes) {
+            const chunk = completeAudio.slice(offset, Math.min(offset + maximumChunkBytes, completeAudio.byteLength));
+            this.enqueueAvatarUpload(chunk, generation, generationBarrier);
+        }
+    }
+
+    enqueueAvatarUpload(bytes, generation, generationBarrier) {
         this.uploadQueue = this.uploadQueue.then(async () => {
+            await generationBarrier;
             if (this.stopped || generation !== this.generation) return;
             const controller = new AbortController();
             this.uploadAbortController = controller;
@@ -257,11 +273,16 @@ export class ConversationClient {
             this.onState?.('listening');
             return;
         }
-        fetch('/media/api/elevenlabs/interrupt', {
+        const interruptedGeneration = this.generation;
+        this.generationBarrier = fetch('/media/api/elevenlabs/interrupt', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-LiveTalking-Token': this.control_token },
-            body: JSON.stringify({ generation: this.generation }),
-        }).catch(() => {});
+            body: JSON.stringify({ generation: interruptedGeneration }),
+        }).then((response) => {
+            if (!response.ok) throw new Error(`Avatar interrupt HTTP ${response.status}`);
+        }).catch((error) => {
+            if (!this.stopped && interruptedGeneration === this.generation) this.onError?.(error.message);
+        });
     }
 
     stop() {

@@ -9,6 +9,8 @@ const labels = {
     en: { idle: 'Tap to talk', connecting: 'Preparing voice…', listening: 'I am listening…', thinking: 'Thinking…', speaking: 'Speaking…', placeholder: 'Speak or type your question…' },
 };
 
+const WHEP_CONNECT_TIMEOUT_MS = 8000;
+
 function InteractiveExperience({ onlyEmbed }) {
     const videoRef = useRef(null);
     const conversationRef = useRef(null);
@@ -35,6 +37,31 @@ function InteractiveExperience({ onlyEmbed }) {
         let fallbackRetryTimer;
         let fallbackRetryCount = 0;
 
+        function waitForPeerConnection(activePeer) {
+            return new Promise((resolve, reject) => {
+                let timeout;
+                const cleanup = () => {
+                    clearTimeout(timeout);
+                    activePeer.removeEventListener('connectionstatechange', handleStateChange);
+                };
+                const handleStateChange = () => {
+                    if (activePeer.connectionState === 'connected') {
+                        cleanup();
+                        resolve();
+                    } else if (['failed', 'closed'].includes(activePeer.connectionState)) {
+                        cleanup();
+                        reject(new Error(`WHEP connection ${activePeer.connectionState}`));
+                    }
+                };
+                activePeer.addEventListener('connectionstatechange', handleStateChange);
+                timeout = setTimeout(() => {
+                    cleanup();
+                    reject(new Error('WHEP connection timeout'));
+                }, WHEP_CONNECT_TIMEOUT_MS);
+                handleStateChange();
+            });
+        }
+
         async function connectStream() {
             try {
                 peer = new RTCPeerConnection();
@@ -50,8 +77,11 @@ function InteractiveExperience({ onlyEmbed }) {
                 });
                 if (!response.ok) throw new Error(`WHEP ${response.status}`);
                 await peer.setRemoteDescription({ type: 'answer', sdp: await response.text() });
+                await waitForPeerConnection(peer);
             } catch (whepError) {
                 if (cancelled || !mpegts.isSupported()) throw whepError;
+                peer?.close();
+                peer = undefined;
                 await connectFallback();
             }
         }
@@ -76,10 +106,14 @@ function InteractiveExperience({ onlyEmbed }) {
         async function connectFallback() {
             if (cancelled || !videoRef.current) return;
             destroyFallback();
+            videoRef.current.srcObject = null;
             fallback = mpegts.createPlayer({
                 type: 'flv',
                 isLive: true,
                 url: liveUrl(),
+            }, {
+                enableStashBuffer: false,
+                liveBufferLatencyChasing: true,
             });
             fallback.on(mpegts.Events.ERROR, handleFallbackError);
             fallback.attachMediaElement(videoRef.current);
