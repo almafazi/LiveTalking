@@ -47,13 +47,22 @@ class PublishExperience implements ShouldQueue
                 throw new RuntimeException('Pilih avatar berstatus ready sebelum publish.');
             }
 
+            $elevenLabs->updateConversationDuration();
+
             if ($snapshot['voice']) {
                 $elevenLabs->updateVoice($snapshot['voice']['voice_id'], $snapshot['voice']['model_id']);
-                $verified = $elevenLabs->agent();
+            }
+
+            $verified = $elevenLabs->agent();
+            if ($snapshot['voice']) {
                 $activeVoice = data_get($verified, 'conversation_config.tts.voice_id');
                 if ($activeVoice !== $snapshot['voice']['voice_id']) {
                     throw new RuntimeException('ElevenLabs voice verification failed.');
                 }
+            }
+            $activeDuration = (int) data_get($verified, 'conversation_config.conversation.max_duration_seconds');
+            if ($activeDuration !== (int) config('services.elevenlabs.max_duration_seconds')) {
+                throw new RuntimeException('ElevenLabs conversation duration verification failed.');
             }
 
             $disk = Storage::disk(config('filesystems.avatar_disk'));

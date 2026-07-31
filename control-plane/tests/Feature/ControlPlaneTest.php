@@ -90,6 +90,7 @@ class ControlPlaneTest extends TestCase
         config()->set('filesystems.avatar_disk', 'local');
         config()->set('services.elevenlabs.api_key', 'test-key');
         config()->set('services.elevenlabs.agent_id', 'agent-test');
+        config()->set('services.elevenlabs.max_duration_seconds', 3600);
         config()->set('services.runtime.token', 'runtime-test');
 
         Storage::disk('local')->put('avatars/artifacts/aurora.tar.gz', 'artifact');
@@ -105,7 +106,10 @@ class ControlPlaneTest extends TestCase
 
         Http::fake(function ($request) {
             if (str_contains($request->url(), '/convai/agents/')) {
-                return Http::response(['conversation_config' => ['tts' => ['voice_id' => 'voice-test']]]);
+                return Http::response(['conversation_config' => [
+                    'tts' => ['voice_id' => 'voice-test'],
+                    'conversation' => ['max_duration_seconds' => 3600],
+                ]]);
             }
             if (str_contains($request->url(), '/internal/deployments')) {
                 return Http::response(['status' => 'healthy', 'health' => ['http_status' => 200]]);
@@ -119,5 +123,8 @@ class ControlPlaneTest extends TestCase
         $this->assertSame(1, $settings->fresh()->active_revision);
         $this->assertSame('healthy', Deployment::query()->first()->status);
         $this->assertFalse($settings->fresh()->maintenance);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/convai/agents/')
+            && $request->method() === 'PATCH'
+            && data_get($request->data(), 'conversation_config.conversation.max_duration_seconds') === 3600);
     }
 }
