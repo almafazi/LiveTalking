@@ -307,7 +307,7 @@ ELEVENLABS_API_KEY=...      # wajib untuk mode conversation
 ELEVENLABS_AGENT_ID=...
 ELEVENLABS_BASE_URL=https://api.elevenlabs.io/v1
 # di LIVETALKING_COMMAND_TEMPLATE:
-#   --audio_start_watermark_ms 300   buffer 300 ms sebelum mulai bicara
+#   --audio_start_watermark_ms 120   buffer 120 ms sebelum mulai bicara
 #   --underrun_hold_ms 1500          tahan pose mulut terakhir saat audio putus
 ```
 
