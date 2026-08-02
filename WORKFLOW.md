@@ -334,6 +334,25 @@ ConvAI response complete generation=0 messages=9 samples=... (2.8x real-time)
 状态切换：静音 → 说话   ← tepat SATU pasang per giliran bicara
 ```
 
+**Instrumentasi latensi** — `grep LATENCY livetalking.log`, satu ringkasan per
+giliran:
+
+```text
+LATENCY turn-start gen=1 trigger=voice chars=27
+LATENCY turn      gen=1 trigger=voice tts_first_ms=12 playout_ms=1368 pipeline_ms=1357
+LATENCY summary   gen=1 trigger=voice reason=completed audio_s=14.3 ingest_rate=2.9x ...
+```
+
+- `trigger` — `voice` (bicara) / `text` (ketik) / `greeting` (sapaan pembuka).
+- `tts_first_ms` — transkrip → audio pertama tiba di engine (porsi ElevenLabs).
+  Pada giliran suara nilainya ~10-30 ms karena ElevenLabs mengirim event
+  transkrip *setelah* audio mulai dibuat; porsi mereka tidak terlihat dari sini.
+- `pipeline_ms` — audio pertama → frame benar-benar dikirim ke WebRTC. Baseline
+  terukur (7 giliran, 2026-08): **1354-1414 ms**, sangat stabil.
+- `ingest_rate` — kecepatan audio masuk; < 1.0x berarti sumber lambat (anomali).
+- `reason` — `completed` / `interrupted` (barge-in) / `relay_closed`.
+  Catatan: pada `relay_closed` di tengah respons, `audio_s` dilaporkan 0.0.
+
 Rasio `x real-time` < 1.0 berarti ElevenLabs/jaringan server lambat — itu
 anomali, selidiki. `ConvAI response idle-flushed` = watchdog menutup respons
 yang tidak mengirim `agent_response_complete` (normal untuk sapaan pembuka).
