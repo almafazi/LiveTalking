@@ -59,7 +59,9 @@ function wavBlob(pcmBytes, sampleRate) {
 // Keep several EasyWav2Lip inference batches queued so normal HTTP jitter does
 // not briefly drain the avatar audio queue between ElevenLabs audio events.
 const AVATAR_UPLOAD_CHUNK_MS = 600;
-const AVATAR_IDLE_FLUSH_MS = 600;
+const AVATAR_START_BUFFER_MS = 1200;
+const AVATAR_IDLE_FLUSH_MS = 1200;
+const AVATAR_MIN_FINAL_CHUNK_MS = 160;
 
 export class ConversationClient {
     constructor(options) {
@@ -78,6 +80,7 @@ export class ConversationClient {
         this.generationBarrier = Promise.resolve();
         this.pcmRemainder = new Uint8Array(0);
         this.avatarFlushTimer = null;
+        this.avatarAudioStarted = false;
         this.playbackGain = null;
         this.playbackSources = new Set();
         this.nextPlaybackTime = 0;
@@ -158,31 +161,46 @@ export class ConversationClient {
             frameBytes,
             Math.floor((this.outputRate * AVATAR_UPLOAD_CHUNK_MS / 1000 * 2) / frameBytes) * frameBytes,
         );
+        const startBufferBytes = Math.max(
+            targetChunkBytes,
+            Math.floor((this.outputRate * AVATAR_START_BUFFER_MS / 1000 * 2) / frameBytes) * frameBytes,
+        );
         let offset = 0;
-        while (combined.byteLength - offset >= targetChunkBytes) {
-            this.enqueueAvatarUpload(
-                combined.slice(offset, offset + targetChunkBytes),
-                this.generation,
-                this.generationBarrier,
-            );
-            offset += targetChunkBytes;
+        if (this.avatarAudioStarted || combined.byteLength >= startBufferBytes) {
+            this.avatarAudioStarted = true;
+            while (combined.byteLength - offset >= targetChunkBytes) {
+                this.enqueueAvatarUpload(
+                    combined.slice(offset, offset + targetChunkBytes),
+                    this.generation,
+                    this.generationBarrier,
+                );
+                offset += targetChunkBytes;
+            }
         }
         this.pcmRemainder = combined.slice(offset);
         clearTimeout(this.avatarFlushTimer);
-        this.avatarFlushTimer = this.pcmRemainder.byteLength
-            ? setTimeout(() => this.flushAvatarAudio(), AVATAR_IDLE_FLUSH_MS)
-            : null;
+        this.avatarFlushTimer = setTimeout(() => this.flushAvatarAudio(), AVATAR_IDLE_FLUSH_MS);
     }
 
     flushAvatarAudio() {
         clearTimeout(this.avatarFlushTimer);
         this.avatarFlushTimer = null;
-        if (this.playbackMode === 'browser' || !this.pcmRemainder.byteLength) return;
+        if (this.playbackMode === 'browser') return;
         const frameBytes = Math.max(2, Math.round(this.outputRate * 0.02) * 2);
         const completeBytes = Math.floor(this.pcmRemainder.byteLength / frameBytes) * frameBytes;
-        const finalChunk = this.pcmRemainder.slice(0, completeBytes);
+        let finalChunk = this.pcmRemainder.slice(0, completeBytes);
         this.pcmRemainder = new Uint8Array(0);
+        this.avatarAudioStarted = false;
         if (finalChunk.byteLength) {
+            const minimumFinalBytes = Math.max(
+                frameBytes,
+                Math.ceil((this.outputRate * AVATAR_MIN_FINAL_CHUNK_MS / 1000 * 2) / frameBytes) * frameBytes,
+            );
+            if (finalChunk.byteLength < minimumFinalBytes) {
+                const paddedChunk = new Uint8Array(minimumFinalBytes);
+                paddedChunk.set(finalChunk);
+                finalChunk = paddedChunk;
+            }
             this.enqueueAvatarUpload(finalChunk, this.generation, this.generationBarrier);
         }
     }
@@ -303,6 +321,7 @@ export class ConversationClient {
         this.generation += 1;
         clearTimeout(this.avatarFlushTimer);
         this.avatarFlushTimer = null;
+        this.avatarAudioStarted = false;
         this.pcmRemainder = new Uint8Array(0);
         this.responseComplete = false;
         this.uploadAbortController?.abort();
@@ -340,6 +359,7 @@ export class ConversationClient {
         this.uploadAbortController = null;
         clearTimeout(this.avatarFlushTimer);
         this.avatarFlushTimer = null;
+        this.avatarAudioStarted = false;
         clearTimeout(this.playbackIdleTimer);
         this.playbackIdleTimer = null;
         for (const playbackSource of this.playbackSources) {

@@ -219,6 +219,9 @@ async def elevenlabs_audio(request):
             return json_error("session not found", status=404)
         avatar_session.put_audio_file(filebytes, {"generation": generation})
         return json_ok()
+    except ConnectionResetError:
+        logger.info("ElevenLabs audio upload cancelled by client")
+        return json_error("Audio upload cancelled", code=-3, status=499)
     except Exception as e:
         logger.exception('elevenlabs_audio exception:')
         return json_error(str(e), status=500)
