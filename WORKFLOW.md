@@ -29,20 +29,31 @@ Contoh: `http://99.213.88.59:43117/rtcpushapi.html`
 ## Arsitektur
 
 ```
-Browser ──TCP :8010──► LiveTalking (API + /rtcpushapi.html + /srs-live FLV proxy)
-                              │
-                              └──WHIP localhost──► SRS
-                                   API      :10100
-                                   RTC UDP  :10001   (publish LT→SRS)
-                                   HTTP-FLV :8088    (proxy lewat /srs-live)
-                                   RTC TCP  :10200   (opsional WHEP)
+                       ┌─ percakapan (1 WebSocket): mic PCM naik, state turun
+Browser ──► Cloudflare ┤
+                       └─ video: WHEP langsung :10200, atau FLV via nginx
+                                │
+                     nginx Laravel (/media/*) ──TCP :8010──► LiveTalking engine
+                                │                                │
+                                │                                ├──WSS──► ElevenLabs ConvAI
+                                │                                │         (server-side, sejak 2026-08)
+                                │                                └──WHIP localhost──► SRS
+                                └─(opsional SRS_FLV_PUBLIC_URL)──────────► SRS :8088 FLV
+                                                                  API      :10100
+                                                                  RTC UDP  :10001  (publish LT→SRS)
+                                                                  RTC TCP  :10200  (WHEP publik)
 ```
+
+**Audio agent TIDAK lagi lewat browser.** Engine membuka WebSocket ConvAI
+sendiri (`server/convai.py`); browser hanya mengirim mikrofon dan menerima
+event state. Lihat bagian *Percakapan ElevenLabs (server-side)* di bawah.
 
 | Container port | Public (contoh) | Fungsi |
 |----------------|-----------------|--------|
 | TCP 8010 | `$VAST_TCP_PORT_8010` | UI + API LiveTalking |
+| TCP 8088 | `$VAST_TCP_PORT_8088` | SRS HTTP-FLV (untuk `SRS_FLV_PUBLIC_URL`) |
 | TCP 10100 | `$VAST_TCP_PORT_10100` | SRS API (internal OK) |
-| TCP 10200 | `$VAST_TCP_PORT_10200` | WHEP media TCP (opsional) |
+| TCP 10200 | `$VAST_TCP_PORT_10200` | WHEP media TCP |
 | UDP 10001 | `$VAST_UDP_PORT_10001` | RTC media (publish lokal) |
 
 ### WHEP/WebRTC-over-TCP untuk player utama
@@ -269,6 +280,68 @@ MuseTalk load lama → `startsecs=60` di conf (bukan 15).
 
 ---
 
+## Percakapan ElevenLabs (server-side ConvAI) — jalur utama sejak 2026-08
+
+Akar masalah avatar tersendat dulu: audio agent menempuh ElevenLabs → browser
+pengguna → Cloudflare → Laravel → engine, sehingga lip-sync bergantung pada
+koneksi pengguna (terukur bisa jatuh ke 0.4x real-time). Sekarang engine
+membuka WebSocket ConvAI sendiri (`server/convai.py`) — terukur 3-5x real-time
+dari VPS GPU — dan browser hanya membawa mikrofon.
+
+**Alur:**
+
+```text
+Browser ── WS /media/api/elevenlabs/stream (init mode:'conversation')
+   naik : BINARY mic PCM16 16 kHz ~20 ms, {"type":"user_message"|"interrupt"|"end"}
+   turun: {"type":"ready"|"state"|"user_transcript"|"agent_response"|
+           "interrupted"|"error"|"closed"}
+Engine ── WSS api.elevenlabs.io (signed URL di-mint engine per percakapan)
+   audio agent → put_audio_frame → lip-sync   (tidak menyentuh browser)
+```
+
+**Konfigurasi engine** (`/workspace/LiveTalking/.env.runtime`, diwarisi child
+via `deploy/vast/runtime-manager.sh`):
+
+```bash
+ELEVENLABS_API_KEY=...      # wajib untuk mode conversation
+ELEVENLABS_AGENT_ID=...
+ELEVENLABS_BASE_URL=https://api.elevenlabs.io/v1
+# di LIVETALKING_COMMAND_TEMPLATE:
+#   --audio_start_watermark_ms 300   buffer 300 ms sebelum mulai bicara
+#   --underrun_hold_ms 1500          tahan pose mulut terakhir saat audio putus
+```
+
+Agent ElevenLabs harus diset `pcm_16000` dua arah (dilakukan otomatis oleh
+publish job Laravel).
+
+**Toggle di Laravel** (`control-plane/.env`): `ENGINE_CONVAI=true` (default).
+Set `false` untuk kembali ke jalur legacy (browser relay); `signed_url` ikut
+dikembalikan lagi ke browser. `/api/public/conversation` mengembalikan
+`conversation_transport: engine|legacy|browser` yang dipakai
+`conversation-client.js` memilih mode.
+
+**Perilaku barge-in:** interupsi (event ElevenLabs, `user_transcript` saat
+agent bicara, `{"type":"interrupt"}`, atau `user_message`) menaikkan
+`generation`, mem-flush antrian, dan membisukan batch lama yang masih ada di
+antrian mel/render lewat stempel `flush_epoch` — mulut berhenti ~20 ms setelah
+interupsi (sisa ≤~0.24 dtk hanya dari antrian playout WebRTC).
+
+**Sinyal log sehat** (`livetalking.log`):
+
+```text
+ConvAI relay started session=0 language=id
+ConvAI response complete generation=0 messages=9 samples=... (2.8x real-time)
+状态切换：静音 → 说话   ← tepat SATU pasang per giliran bicara
+```
+
+Rasio `x real-time` < 1.0 berarti ElevenLabs/jaringan server lambat — itu
+anomali, selidiki. `ConvAI response idle-flushed` = watchdog menutup respons
+yang tidak mengirim `agent_response_complete` (normal untuk sapaan pembuka).
+Bila `ELEVENLABS_API_KEY` kosong, mode conversation membalas error
+`signed_url_failed` dan hanya jalur legacy yang berfungsi.
+
+---
+
 ## Install dari nol (instance baru)
 
 ```bash
@@ -335,15 +408,22 @@ Fetch stream meet Early-EOF
 UnrecoverableEarlyEof
 ```
 
-Alur media pada deployment control-plane adalah:
+Alur media pada deployment control-plane:
 
 ```text
 Browser
   -> https://DOMAIN/media/srs-live/live/livestream.flv
-  -> Cloudflare / reverse proxy aaPanel
-  -> http://VAST_IP:VAST_TCP_PORT_8010/srs-live/live/livestream.flv
-  -> LiveTalking -> SRS
+  -> Cloudflare / nginx control-plane
+  -> (a) http://VAST_IP:VAST_TCP_PORT_8088/live/livestream.flv   -> SRS langsung
+     (b) http://VAST_IP:VAST_TCP_PORT_8010/srs-live/...          -> relay engine (fallback)
 ```
+
+Jalur (a) dipakai bila `SRS_FLV_PUBLIC_URL` diset di `control-plane/.env`
+(mis. `http://115.73.210.129:23026` = `$VAST_TCP_PORT_8088`), lalu
+`docker compose up -d nginx`. Tanpa env itu nginx jatuh ke (b) — tetap
+berfungsi, tetapi relay byte berjalan di event loop engine. Verifikasi jalur
+mana yang aktif dari VPS GPU: `ss -tnp | grep :8088` saat FLV diputar — koneksi
+dari proses `python` = masih relay engine; dari IP eksternal = direct SRS.
 
 Walaupun reverse proxy meneruskan request ke Vast dengan HTTP/1.1, browser dapat
 terhubung ke Cloudflare menggunakan HTTP/3. Kegagalan QUIC pada koneksi FLV yang
@@ -401,7 +481,12 @@ Untuk ketahanan tambahan, player mpegts.js di control-plane sebaiknya memakai
 `enableStashBuffer: false`, `liveBufferLatencyChasing: true`, dan menyambungkan
 ulang player ketika menerima error `EarlyEof`.
 
-### Audio avatar ElevenLabs tersendat antar-chunk
+### Audio avatar ElevenLabs tersendat antar-chunk (LEGACY)
+
+> Sejak 2026-08 jalur utama adalah **server-side ConvAI** (lihat bagian
+> *Percakapan ElevenLabs* di atas) — audio agent tidak lagi lewat browser,
+> dan underrun ditangani watermark + hold-pose. Bagian ini hanya relevan
+> saat `ENGINE_CONVAI=false` (mode legacy browser-relay).
 
 Jangan mengirim output conversational ElevenLabs sebagai rangkaian file WAV
 pendek ke `/media/api/elevenlabs/audio`. `put_audio_file()` memberi event
@@ -413,7 +498,7 @@ antrean ASR 10 ms, runtime menyisipkan frame silence dan log akan berganti cepat
 状态切换：静音 → 说话
 ```
 
-Jalur utama control-plane menggunakan satu WebSocket PCM kontinu:
+Jalur legacy menggunakan satu WebSocket PCM kontinu dari browser:
 
 ```text
 Browser /media/api/elevenlabs/stream
@@ -423,7 +508,8 @@ Browser /media/api/elevenlabs/stream
 ```
 
 Di ElevenLabs, set agent output ke `pcm_16000`. Reverse proxy harus meneruskan
-header Upgrade dan tidak melakukan response buffering:
+header Upgrade dan tidak melakukan response buffering (lokasi WS yang sama
+dipakai mode conversation server-side):
 
 ```nginx
 location = /media/api/elevenlabs/stream {
