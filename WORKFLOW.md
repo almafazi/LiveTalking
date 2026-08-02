@@ -350,11 +350,13 @@ git clone --depth 1 https://github.com/almafazi/LiveTalking.git /workspace/LiveT
 source /venv/main/bin/activate
 uv pip install -r /workspace/LiveTalking/requirements.txt gdown face_recognition "setuptools<81"
 
-# 2) SRS binary (no Docker)
+# 2) SRS binary (no Docker) — WAJIB >= 5.0.156: handler /rtc/v1/whep/ baru ada
+#    sejak versi itu. 5.0.155 (b0) membuat WHEP selalu gagal -> player jatuh ke
+#    FLV (latensi +1-3 dtk). Terpasang sekarang: 5.0.213 (v5.0-r3).
 cd /tmp && curl -fL -o srs.zip \
-  https://github.com/ossrs/srs/releases/download/v5.0-b0/SRS-CentOS7-x86_64-5.0-b0.zip
+  https://github.com/ossrs/srs/releases/download/v5.0-r3/SRS-CentOS7-x86_64-5.0-r3.zip
 unzip -o srs.zip -d /tmp/srs-extract
-cp -a /tmp/srs-extract/SRS-CentOS7-x86_64-5.0-b0/usr/local/srs /usr/local/
+cp -a /tmp/srs-extract/SRS-CentOS7-x86_64-5.0-r3/usr/local/srs /usr/local/
 cp /workspace/LiveTalking/deploy/srs-livetalking.conf /usr/local/srs/conf/livetalking.conf
 chmod +x /usr/local/srs/objs/srs
 
@@ -554,7 +556,8 @@ stream video.
 | FPS < 25 | Turunkan `batch_size`, cek `nvidia-smi` |
 | Avatar missing | Cek `data/avatars/<id>/latents.pt` (musetalk) atau `coords.pkl`+imgs (wav2lip) |
 | OOM GPU | `batch_size=1` atau tutup proses GPU lain |
-| WHEP docs (`:1985` UDP) gagal | Diharapkan di Vast; pakai **FLV** `rtcpushapi.html` |
+| WHEP docs (`:1985` UDP) gagal | Diharapkan di Vast; WHEP jalan via **TCP 10200** (`SRS_RTC_EIP`) |
+| WHEP balas JSON index API, bukan SDP | SRS < 5.0.156 tidak punya `/rtc/v1/whep/` — upgrade binary (lihat Install) |
 | Disk hilang setelah recycle | `workspace_is_volume=false` — sync model/kode keluar box |
 
 ---
