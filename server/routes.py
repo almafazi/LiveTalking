@@ -11,6 +11,7 @@ import secrets
 import time
 from urllib.parse import urlsplit
 import aiohttp
+import numpy as np
 from aiohttp import web
 
 from utils.logger import logger
@@ -225,6 +226,180 @@ async def elevenlabs_audio(request):
     except Exception as e:
         logger.exception('elevenlabs_audio exception:')
         return json_error(str(e), status=500)
+
+
+async def elevenlabs_audio_stream(request):
+    """Stream one ElevenLabs response as continuous 16 kHz PCM over WebSocket.
+
+    The browser authenticates in the first JSON message so the short-lived
+    control token never appears in the URL or reverse-proxy access logs. Audio
+    messages contain little-endian PCM16. One frame is held back so only the
+    response boundary, rather than every network message, receives an ``end``
+    event.
+    """
+    ws = web.WebSocketResponse(heartbeat=20, max_msg_size=ELEVENLABS_MAX_AUDIO_BYTES)
+    await ws.prepare(request)
+
+    control = None
+    avatar_session = None
+    active_generation = None
+    pending_frame = None
+    remainder = bytearray()
+    response_started = False
+    response_bytes = 0
+    response_messages = 0
+
+    async def send_error(message, code="stream_error"):
+        await ws.send_json({"type": "error", "code": code, "message": message})
+
+    def reset_response():
+        nonlocal active_generation, pending_frame, remainder, response_started
+        nonlocal response_bytes, response_messages
+        active_generation = None
+        pending_frame = None
+        remainder = bytearray()
+        response_started = False
+        response_bytes = 0
+        response_messages = 0
+
+    def put_frame(frame, end=False):
+        nonlocal response_started
+        eventpoint = {"generation": active_generation}
+        if not response_started:
+            eventpoint["status"] = "start"
+            response_started = True
+        if end:
+            eventpoint["status"] = "end"
+        avatar_session.put_audio_frame(frame, eventpoint)
+
+    def consume_pcm(payload):
+        nonlocal pending_frame, remainder, response_bytes, response_messages
+        response_messages += 1
+        response_bytes += len(payload)
+        remainder.extend(payload)
+        frame_bytes = avatar_session.chunk * 2
+        while len(remainder) >= frame_bytes:
+            raw_frame = bytes(remainder[:frame_bytes])
+            del remainder[:frame_bytes]
+            frame = np.frombuffer(raw_frame, dtype="<i2").astype(np.float32) / 32768.0
+            if pending_frame is not None:
+                put_frame(pending_frame)
+            pending_frame = frame
+
+    def finish_response():
+        nonlocal pending_frame, remainder
+        if remainder:
+            even_bytes = len(remainder) - (len(remainder) % 2)
+            raw_tail = bytes(remainder[:even_bytes])
+            if raw_tail:
+                tail = np.frombuffer(raw_tail, dtype="<i2").astype(np.float32) / 32768.0
+                padded = np.zeros(avatar_session.chunk, dtype=np.float32)
+                padded[:min(tail.shape[0], padded.shape[0])] = tail[:padded.shape[0]]
+                if pending_frame is not None:
+                    put_frame(pending_frame)
+                pending_frame = padded
+        if pending_frame is not None:
+            put_frame(pending_frame, end=True)
+        logger.info(
+            "ElevenLabs PCM response complete generation=%s messages=%s samples=%s",
+            active_generation,
+            response_messages,
+            response_bytes // 2,
+        )
+        reset_response()
+
+    try:
+        try:
+            hello = await asyncio.wait_for(ws.receive(), timeout=10)
+        except asyncio.TimeoutError:
+            await send_error("Audio stream authentication timed out", "auth_timeout")
+            return ws
+        if hello.type != aiohttp.WSMsgType.TEXT:
+            await send_error("Expected an authentication message", "invalid_auth")
+            return ws
+        try:
+            params = json.loads(hello.data)
+        except (TypeError, ValueError):
+            await send_error("Invalid authentication message", "invalid_auth")
+            return ws
+        if params.get("type") != "init":
+            await send_error("Expected an init message", "invalid_auth")
+            return ws
+
+        token = str(params.get("token", ""))
+        control = _elevenlabs_sessions(request.app).get(token)
+        if not token or control is None:
+            await send_error("Invalid or expired conversation token", "invalid_token")
+            return ws
+        control["expires_at"] = time.monotonic() + ELEVENLABS_SESSION_TTL_SECONDS
+        avatar_session = get_session(request, control["sessionid"])
+        if avatar_session is None:
+            await send_error("Avatar session not found", "session_not_found")
+            return ws
+        logger.info("ElevenLabs PCM stream connected session=%s", control["sessionid"])
+        await ws.send_json({"type": "ready", "sample_rate": avatar_session.sample_rate})
+
+        async for message in ws:
+            control["expires_at"] = time.monotonic() + ELEVENLABS_SESSION_TTL_SECONDS
+            if message.type == aiohttp.WSMsgType.BINARY:
+                if active_generation is None:
+                    await send_error("Audio received before response start", "response_not_started")
+                    continue
+                if active_generation != control["generation"]:
+                    reset_response()
+                    continue
+                consume_pcm(message.data)
+                continue
+            if message.type != aiohttp.WSMsgType.TEXT:
+                if message.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.ERROR):
+                    break
+                continue
+            try:
+                params = json.loads(message.data)
+            except (TypeError, ValueError):
+                await send_error("Invalid stream control message", "invalid_message")
+                continue
+
+            message_type = params.get("type")
+            if message_type == "start":
+                try:
+                    generation = int(params.get("generation", -1))
+                    sample_rate = int(params.get("sample_rate", 0))
+                except (TypeError, ValueError):
+                    await send_error("Invalid response metadata", "invalid_start")
+                    continue
+                if generation != control["generation"]:
+                    await send_error("Stale audio generation", "stale_generation")
+                    continue
+                if sample_rate != avatar_session.sample_rate:
+                    await send_error(
+                        f"PCM stream must be {avatar_session.sample_rate} Hz",
+                        "unsupported_sample_rate",
+                    )
+                    continue
+                reset_response()
+                active_generation = generation
+                logger.info("ElevenLabs PCM response start generation=%s", generation)
+                continue
+            if message_type == "end":
+                if active_generation == control["generation"]:
+                    finish_response()
+                else:
+                    reset_response()
+                continue
+            await send_error("Unknown stream control message", "invalid_message")
+    except (ConnectionResetError, asyncio.CancelledError):
+        logger.info("ElevenLabs PCM stream disconnected")
+    except Exception:
+        logger.exception("elevenlabs_audio_stream exception:")
+    finally:
+        if active_generation is not None and control is not None:
+            if active_generation == control["generation"] and avatar_session is not None:
+                finish_response()
+        if not ws.closed:
+            await ws.close()
+    return ws
 
 
 async def elevenlabs_interrupt(request):
@@ -476,6 +651,7 @@ def setup_routes(app):
     app.router.add_post("/is_speaking", is_speaking)
     app.router.add_get("/api/elevenlabs/signed-url", elevenlabs_signed_url)
     app.router.add_post("/api/audio/session", create_audio_session)
+    app.router.add_get("/api/elevenlabs/stream", elevenlabs_audio_stream)
     app.router.add_post("/api/elevenlabs/audio", elevenlabs_audio)
     app.router.add_post("/api/elevenlabs/interrupt", elevenlabs_interrupt)
     app.router.add_post("/api/elevenlabs/end", elevenlabs_end)

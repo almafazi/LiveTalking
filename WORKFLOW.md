@@ -401,6 +401,47 @@ Untuk ketahanan tambahan, player mpegts.js di control-plane sebaiknya memakai
 `enableStashBuffer: false`, `liveBufferLatencyChasing: true`, dan menyambungkan
 ulang player ketika menerima error `EarlyEof`.
 
+### Audio avatar ElevenLabs tersendat antar-chunk
+
+Jangan mengirim output conversational ElevenLabs sebagai rangkaian file WAV
+pendek ke `/media/api/elevenlabs/audio`. `put_audio_file()` memberi event
+`start` dan `end` pada setiap file. Jika jeda antar-request melewati timeout
+antrean ASR 10 ms, runtime menyisipkan frame silence dan log akan berganti cepat:
+
+```text
+状态切换：说话 → 静音
+状态切换：静音 → 说话
+```
+
+Jalur utama control-plane menggunakan satu WebSocket PCM kontinu:
+
+```text
+Browser /media/api/elevenlabs/stream
+  -> reverse proxy WebSocket
+  -> runtime-manager /api/elevenlabs/stream
+  -> frame PCM16 mono 16 kHz per 20 ms
+```
+
+Di ElevenLabs, set agent output ke `pcm_16000`. Reverse proxy harus meneruskan
+header Upgrade dan tidak melakukan response buffering:
+
+```nginx
+location = /media/api/elevenlabs/stream {
+    proxy_pass http://VAST_RUNTIME/api/elevenlabs/stream;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+```
+
+Verifikasi di DevTools bahwa request `stream` mendapat status `101 Switching
+Protocols`. Pada runtime, satu jawaban normal menghasilkan tepat satu pasang log
+`PCM response start` dan `PCM response complete`. Endpoint WAV lama tetap ada
+sebagai fallback, tetapi bukan jalur utama low-latency.
+
 ### Error audio ElevenLabs 409
 
 Respons berikut bukan error FLV/QUIC:

@@ -56,12 +56,13 @@ function wavBlob(pcmBytes, sampleRate) {
     return new Blob([header, pcmBytes], { type: 'audio/wav' });
 }
 
-// Keep several EasyWav2Lip inference batches queued so normal HTTP jitter does
-// not briefly drain the avatar audio queue between ElevenLabs audio events.
+// Prebuffer once at the beginning of a response. After that, PCM flows through
+// one WebSocket so network message boundaries never become avatar silence.
 const AVATAR_UPLOAD_CHUNK_MS = 600;
 const AVATAR_START_BUFFER_MS = 1200;
 const AVATAR_IDLE_FLUSH_MS = 1200;
 const AVATAR_MIN_FINAL_CHUNK_MS = 160;
+const AVATAR_STREAM_SAMPLE_RATE = 16000;
 
 export class ConversationClient {
     constructor(options) {
@@ -81,6 +82,9 @@ export class ConversationClient {
         this.pcmRemainder = new Uint8Array(0);
         this.avatarFlushTimer = null;
         this.avatarAudioStarted = false;
+        this.avatarSocket = null;
+        this.avatarSocketReady = false;
+        this.avatarStreamQueue = Promise.resolve();
         this.playbackGain = null;
         this.playbackSources = new Set();
         this.nextPlaybackTime = 0;
@@ -94,7 +98,63 @@ export class ConversationClient {
         this.stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
         await this.startMic();
         await this.connectSocket();
+        if (this.playbackMode !== 'browser') await this.connectAvatarStream();
         this.onState?.('listening');
+    }
+
+    connectAvatarStream() {
+        if (this.outputRate !== AVATAR_STREAM_SAMPLE_RATE) {
+            console.warn(`Avatar PCM WebSocket requires ${AVATAR_STREAM_SAMPLE_RATE} Hz; using HTTP fallback for ${this.outputRate} Hz audio.`);
+            return Promise.resolve(false);
+        }
+        return new Promise((resolve) => {
+            const url = new URL('/media/api/elevenlabs/stream', window.location.href);
+            url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const socket = new WebSocket(url);
+            this.avatarSocket = socket;
+            socket.binaryType = 'arraybuffer';
+            let settled = false;
+            let wasReady = false;
+            const finish = (ready) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeout);
+                resolve(ready);
+            };
+            const timeout = setTimeout(() => {
+                socket.close();
+                finish(false);
+            }, 5000);
+            socket.onopen = () => socket.send(JSON.stringify({
+                type: 'init',
+                token: this.control_token,
+            }));
+            socket.onmessage = (event) => {
+                if (typeof event.data !== 'string') return;
+                let data;
+                try { data = JSON.parse(event.data); } catch { return; }
+                if (data.type === 'ready') {
+                    wasReady = true;
+                    this.avatarSocketReady = true;
+                    finish(true);
+                    return;
+                }
+                if (data.type === 'error') {
+                    console.warn('Avatar PCM stream error:', data.code, data.message);
+                    if (!wasReady) {
+                        socket.close();
+                        finish(false);
+                    }
+                }
+            };
+            socket.onerror = () => finish(false);
+            socket.onclose = () => {
+                this.avatarSocketReady = false;
+                if (this.avatarSocket === socket) this.avatarSocket = null;
+                finish(false);
+                if (wasReady && !this.stopped) this.onError?.('Avatar audio stream disconnected.');
+            };
+        });
     }
 
     connectSocket() {
@@ -153,6 +213,52 @@ export class ConversationClient {
             return;
         }
 
+        if (this.avatarSocketReady) {
+            this.enqueueAvatarStreamAudio(bytes);
+            return;
+        }
+
+        this.enqueueAvatarFallbackAudio(bytes);
+    }
+
+    enqueueAvatarStreamAudio(bytes) {
+        const combined = new Uint8Array(this.pcmRemainder.byteLength + bytes.byteLength);
+        combined.set(this.pcmRemainder);
+        combined.set(bytes, this.pcmRemainder.byteLength);
+        const startBufferBytes = Math.round(this.outputRate * AVATAR_START_BUFFER_MS / 1000) * 2;
+
+        if (!this.avatarAudioStarted && combined.byteLength < startBufferBytes) {
+            this.pcmRemainder = combined;
+        } else {
+            const generation = this.generation;
+            const firstMessage = !this.avatarAudioStarted;
+            this.avatarAudioStarted = true;
+            this.pcmRemainder = new Uint8Array(0);
+            this.queueAvatarStreamMessage(generation, () => {
+                if (firstMessage) this.avatarSocket.send(JSON.stringify({
+                    type: 'start',
+                    generation,
+                    sample_rate: this.outputRate,
+                }));
+                this.avatarSocket.send(combined);
+            });
+        }
+
+    }
+
+    queueAvatarStreamMessage(generation, callback) {
+        const generationBarrier = this.generationBarrier;
+        this.avatarStreamQueue = this.avatarStreamQueue.then(async () => {
+            await generationBarrier;
+            if (this.stopped || generation !== this.generation || !this.avatarSocketReady || !this.avatarSocket) return;
+            callback();
+        }).catch((error) => {
+            if (!this.stopped && generation === this.generation) this.onError?.(error.message);
+        });
+    }
+
+    enqueueAvatarFallbackAudio(bytes) {
+
         const combined = new Uint8Array(this.pcmRemainder.byteLength + bytes.byteLength);
         combined.set(this.pcmRemainder);
         combined.set(bytes, this.pcmRemainder.byteLength);
@@ -186,6 +292,38 @@ export class ConversationClient {
         clearTimeout(this.avatarFlushTimer);
         this.avatarFlushTimer = null;
         if (this.playbackMode === 'browser') return;
+        if (this.avatarSocketReady) {
+            this.flushAvatarStreamAudio();
+            return;
+        }
+        this.flushAvatarFallbackAudio();
+    }
+
+    flushAvatarStreamAudio() {
+        const generation = this.generation;
+        const finalBytes = this.pcmRemainder.slice(0, this.pcmRemainder.byteLength - (this.pcmRemainder.byteLength % 2));
+        this.pcmRemainder = new Uint8Array(0);
+
+        if (!this.avatarAudioStarted && finalBytes.byteLength) {
+            this.avatarAudioStarted = true;
+            this.queueAvatarStreamMessage(generation, () => {
+                this.avatarSocket.send(JSON.stringify({
+                    type: 'start',
+                    generation,
+                    sample_rate: this.outputRate,
+                }));
+                this.avatarSocket.send(finalBytes);
+            });
+        }
+        if (this.avatarAudioStarted) {
+            this.queueAvatarStreamMessage(generation, () => {
+                this.avatarSocket.send(JSON.stringify({ type: 'end', generation }));
+            });
+        }
+        this.avatarAudioStarted = false;
+    }
+
+    flushAvatarFallbackAudio() {
         const frameBytes = Math.max(2, Math.round(this.outputRate * 0.02) * 2);
         const completeBytes = Math.floor(this.pcmRemainder.byteLength / frameBytes) * frameBytes;
         let finalChunk = this.pcmRemainder.slice(0, completeBytes);
@@ -368,6 +506,9 @@ export class ConversationClient {
         this.playbackSources.clear();
         this.context?.close().catch(() => {});
         this.socket?.close();
+        this.avatarSocketReady = false;
+        this.avatarSocket?.close();
+        this.avatarSocket = null;
         if (this.playbackMode === 'browser') return;
         fetch('/media/api/elevenlabs/end', {
             method: 'POST', keepalive: true, headers: { 'X-LiveTalking-Token': this.control_token },
