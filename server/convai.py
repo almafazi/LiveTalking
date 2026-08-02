@@ -202,6 +202,12 @@ class ConvAIRelay:
         self.last_audio = 0.0
         self.closed = False
         self.turn = None
+        # statistik jalur mic (browser -> engine -> ElevenLabs)
+        self._mic_frames = 0
+        self._mic_bytes = 0
+        self._mic_origin = None
+        self._mic_send_total = 0.0
+        self._mic_send_max = 0.0
 
     async def start(self):
         signed_url = await fetch_signed_url()
@@ -283,10 +289,28 @@ class ConvAIRelay:
         if self.upstream is None or self.upstream.closed:
             return
         encoded = base64.b64encode(pcm).decode("ascii")
+        t_send = time.perf_counter()
         try:
             await self.upstream.send_json({"user_audio_chunk": encoded})
         except ConnectionResetError:
-            pass
+            return
+        self._mic_send_total += time.perf_counter() - t_send
+        self._mic_send_max = max(self._mic_send_max, time.perf_counter() - t_send)
+        self._mic_frames += 1
+        self._mic_bytes += len(pcm)
+        if self._mic_origin is None:
+            self._mic_origin = t_send
+        elif self._mic_frames % 250 == 0:
+            wall = time.perf_counter() - self._mic_origin
+            audio_s = self._mic_bytes / 32000.0  # 16 kHz PCM16
+            logger.info(
+                "MIC frames=%s audio_s=%.1f wall_s=%.1f lag_s=%+.2f "
+                "send_avg_ms=%.2f send_max_ms=%.1f",
+                self._mic_frames, audio_s, wall, wall - audio_s,
+                self._mic_send_total / self._mic_frames * 1000,
+                self._mic_send_max * 1000,
+            )
+            self._mic_send_max = 0.0
 
     async def user_message(self, text: str):
         if not text:
