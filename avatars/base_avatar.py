@@ -393,6 +393,15 @@ class BaseAvatar:
             except queue.Empty:
                 continue
 
+            # 打断后残留在 mel/推理队列里的旧语音：静音化，避免继续说完半句
+            flush_seq = self.asr.flush_seq
+            if any(f.userdata and f.userdata.get('flush_epoch', flush_seq) != flush_seq
+                   for f in audio_frames):
+                for stale_frame in audio_frames:
+                    stale_frame.type = 1
+                    stale_frame.data = np.zeros_like(stale_frame.data)
+                res_frame = None
+
             all_silence = audio_frames[0].type!=0 and audio_frames[1].type!=0
             # 语音中途断流的补帧：保持最后口型，不切回静音帧
             is_hold = all_silence and audio_frames[0].type == 1 and self._last_speaking_frame is not None and any(

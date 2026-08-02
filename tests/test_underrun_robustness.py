@@ -95,6 +95,17 @@ class UnderrunHoldTest(unittest.TestCase):
         self.assertEqual(frame.type, 1)
         self.assertFalse(frame.userdata.get("hold"))
 
+    def test_flush_epoch_stamped_and_bumped_on_flush(self):
+        asr = make_asr(watermark_ms=0)
+        asr.put_audio_frame(chunk(), {"status": "start"})
+        frame = asr.get_audio_frame()
+        self.assertEqual(frame.userdata.get("flush_epoch"), 0)
+        asr.flush_talk()
+        self.assertEqual(asr.flush_seq, 1)
+        asr.put_audio_frame(chunk(), {"status": "start"})
+        frame = asr.get_audio_frame()
+        self.assertEqual(frame.userdata.get("flush_epoch"), 1)
+
     def test_flush_talk_resets_state(self):
         asr = make_asr(watermark_ms=300, hold_ms=1500)
         asr.put_audio_frame(chunk(), {"status": "start"})

@@ -34,6 +34,9 @@ services:
       dockerfile: infra/Dockerfile.nginx
     environment:
       RUNTIME_PUBLIC_URL: ${RUNTIME_PUBLIC_URL}
+      # Set ke http://<GPU_IP>:<VAST_TCP_PORT_8088> agar FLV langsung ke SRS;
+      # tanpa diset, jatuh kembali ke relay via engine seperti sebelumnya.
+      SRS_FLV_PUBLIC_URL: ${SRS_FLV_PUBLIC_URL:-${RUNTIME_PUBLIC_URL}/srs-live}
     ports:
       - "127.0.0.1:18080:80"
     depends_on:

@@ -6,8 +6,6 @@
 #  the part that transfers safely to realtime is its soft mouth-region blend.
 ###############################################################################
 
-import copy
-
 import cv2
 import numpy as np
 
@@ -41,21 +39,32 @@ def build_feathered_mouth_mask(height, width, feather, width_ratio, height_ratio
 class EasyWav2LipReal(LipReal):
     """Wav2Lip 256 with an Easy-Wav2Lip-style feathered mouth composite."""
 
+    def _mouth_mask(self, height, width):
+        # 蒙版只取决于裁剪尺寸和三个固定参数，按尺寸缓存避免每帧重建
+        cache = getattr(self, "_mouth_mask_cache", None)
+        if cache is None:
+            cache = self._mouth_mask_cache = {}
+        mask = cache.get((height, width))
+        if mask is None:
+            mask = build_feathered_mouth_mask(
+                height,
+                width,
+                self.opt.easywav2lip_feather,
+                self.opt.easywav2lip_mouth_width,
+                self.opt.easywav2lip_mouth_height,
+            )[..., None]
+            cache[(height, width)] = mask
+        return mask
+
     def paste_back_frame(self, pred_frame, idx: int):
         y1, y2, x1, x2 = self.coord_list_cycle[idx]
-        combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
+        combine_frame = self.frame_list_cycle[idx].copy()
 
         processed = suppress_teeth_highlights(pred_frame, self.teeth_suppression)
         generated = cv2.resize(processed, (x2 - x1, y2 - y1)).astype(np.float32)
         original = combine_frame[y1:y2, x1:x2].astype(np.float32)
 
-        alpha = build_feathered_mouth_mask(
-            y2 - y1,
-            x2 - x1,
-            self.opt.easywav2lip_feather,
-            self.opt.easywav2lip_mouth_width,
-            self.opt.easywav2lip_mouth_height,
-        )[..., None]
+        alpha = self._mouth_mask(y2 - y1, x2 - x1)
         blended = generated * alpha + original * (1.0 - alpha)
         combine_frame[y1:y2, x1:x2] = np.clip(blended, 0, 255).astype(np.uint8)
         return combine_frame

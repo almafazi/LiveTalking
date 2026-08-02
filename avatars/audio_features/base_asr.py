@@ -51,6 +51,8 @@ class BaseASR:
         self._response_active = False
         self._end_buffered = 0  # 'end' frames currently sitting in self.queue
         self._hold_started = 0.0
+        # 打断计数：process_frames 用它静音化仍滞留在下游队列里的旧语音
+        self.flush_seq = 0
 
         #self.warm_up()
 
@@ -59,8 +61,10 @@ class BaseASR:
         self._response_active = False
         self._end_buffered = 0
         self._hold_started = 0.0
+        self.flush_seq += 1
 
     def put_audio_frame(self,audio_chunk:NDArray[np.float32],datainfo:dict): #16khz 20ms pcm
+        datainfo = {**datainfo, 'flush_epoch': self.flush_seq}
         self.queue.put(AudioFrameData(data=audio_chunk,type=0,userdata=datainfo))
         if datainfo.get('status') == 'end':
             self._end_buffered += 1
