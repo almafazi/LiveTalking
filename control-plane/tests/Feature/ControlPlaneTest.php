@@ -28,16 +28,16 @@ class ControlPlaneTest extends TestCase
             ->assertJsonMissingPath('data.voice.voice_id');
     }
 
-    public function test_conversation_bootstrap_combines_provider_and_runtime_tokens(): void
+    public function test_conversation_bootstrap_uses_engine_transport_without_signed_url(): void
     {
         ExperienceSetting::current();
         config()->set('app.only_embed', false);
+        config()->set('app.engine_convai', true);
         config()->set('services.elevenlabs.api_key', 'test-key');
         config()->set('services.elevenlabs.agent_id', 'agent-test');
         config()->set('services.runtime.token', 'runtime-test');
 
         Http::fake([
-            'https://api.elevenlabs.io/*' => Http::response(['signed_url' => 'wss://example.test/conversation']),
             'http://127.0.0.1:8090/internal/audio-sessions' => Http::response([
                 'control_token' => 'control-test', 'generation' => 0,
             ]),
@@ -49,6 +49,33 @@ class ControlPlaneTest extends TestCase
 
         $this->postJson('/api/public/conversation')
             ->assertOk()
+            ->assertJsonPath('data.conversation_transport', 'engine')
+            ->assertJsonPath('data.control_token', 'control-test')
+            ->assertJsonMissingPath('data.signed_url');
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/internal/audio-sessions'));
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), 'api.elevenlabs.io'));
+    }
+
+    public function test_conversation_bootstrap_legacy_transport_combines_provider_and_runtime_tokens(): void
+    {
+        ExperienceSetting::current();
+        config()->set('app.only_embed', false);
+        config()->set('app.engine_convai', false);
+        config()->set('services.elevenlabs.api_key', 'test-key');
+        config()->set('services.elevenlabs.agent_id', 'agent-test');
+        config()->set('services.runtime.token', 'runtime-test');
+
+        Http::fake([
+            'https://api.elevenlabs.io/*' => Http::response(['signed_url' => 'wss://example.test/conversation']),
+            'http://127.0.0.1:8090/internal/audio-sessions' => Http::response([
+                'control_token' => 'control-test', 'generation' => 0,
+            ]),
+        ]);
+
+        $this->postJson('/api/public/conversation')
+            ->assertOk()
+            ->assertJsonPath('data.conversation_transport', 'legacy')
             ->assertJsonPath('data.signed_url', 'wss://example.test/conversation')
             ->assertJsonPath('data.control_token', 'control-test');
 

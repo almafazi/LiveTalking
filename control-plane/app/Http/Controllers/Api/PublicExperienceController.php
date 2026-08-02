@@ -53,15 +53,28 @@ class PublicExperienceController extends Controller
         $settings = ExperienceSetting::current();
         abort_if($settings->maintenance, 503, $settings->maintenance_message ?: 'Service is in maintenance.');
 
-        $session = config('app.only_embed')
-            ? []
-            : $runtime->createAudioSession();
+        if (config('app.only_embed')) {
+            $data = [
+                'conversation_transport' => 'browser',
+                'signed_url' => $elevenLabs->signedUrl(),
+            ];
+        } elseif (config('app.engine_convai')) {
+            // Engine opens the ConvAI socket itself; the browser never needs
+            // the signed URL and never relays avatar audio.
+            $data = array_merge(
+                $runtime->createAudioSession(),
+                ['conversation_transport' => 'engine'],
+            );
+        } else {
+            $data = array_merge(
+                $runtime->createAudioSession(),
+                [
+                    'conversation_transport' => 'legacy',
+                    'signed_url' => $elevenLabs->signedUrl(),
+                ],
+            );
+        }
 
-        return response()->json([
-            'data' => array_merge(
-                $session,
-                ['signed_url' => $elevenLabs->signedUrl()],
-            ),
-        ])->header('Cache-Control', 'no-store');
+        return response()->json(['data' => $data])->header('Cache-Control', 'no-store');
     }
 }

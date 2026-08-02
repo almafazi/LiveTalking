@@ -337,6 +337,12 @@ async def elevenlabs_audio_stream(request):
             await send_error("Avatar session not found", "session_not_found")
             return ws
         logger.info("ElevenLabs PCM stream connected session=%s", control["sessionid"])
+
+        if params.get("mode") == "conversation":
+            # 服务端 ConvAI 中继：引擎自己连 ElevenLabs，浏览器只传麦克风和状态
+            from server.convai import run_conversation
+            return await run_conversation(request, ws, control, avatar_session, params)
+
         await ws.send_json({"type": "ready", "sample_rate": avatar_session.sample_rate})
 
         async for message in ws:

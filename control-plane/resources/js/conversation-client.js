@@ -75,6 +75,10 @@ export class ConversationClient {
         this.outputRate = 24000;
         this.inputRate = 16000;
         this.playbackMode = options.playbackMode || 'avatar';
+        // 'engine': the GPU engine owns the ElevenLabs socket; this client only
+        // streams the microphone and receives state events over one WebSocket.
+        this.engineMode = this.playbackMode !== 'browser'
+            && this.conversation_transport !== 'legacy';
         this.muted = Boolean(options.muted);
         this.generation = Number(options.generation || 0);
         this.uploadQueue = Promise.resolve();
@@ -96,10 +100,76 @@ export class ConversationClient {
 
     async start() {
         this.stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
-        await this.startMic();
-        await this.connectSocket();
-        if (this.playbackMode !== 'browser') await this.connectAvatarStream();
+        if (this.engineMode) {
+            await this.connectEngineSocket();
+            await this.startMic();
+        } else {
+            await this.startMic();
+            await this.connectSocket();
+            if (this.playbackMode !== 'browser') await this.connectAvatarStream();
+        }
         this.onState?.('listening');
+    }
+
+    connectEngineSocket() {
+        return new Promise((resolve, reject) => {
+            const url = new URL('/media/api/elevenlabs/stream', window.location.href);
+            url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const socket = new WebSocket(url);
+            this.socket = socket;
+            socket.binaryType = 'arraybuffer';
+            let ready = false;
+            const timeout = setTimeout(() => {
+                if (!ready) {
+                    socket.close();
+                    reject(new Error('Avatar conversation connection timed out.'));
+                }
+            }, 8000);
+            socket.onopen = () => socket.send(JSON.stringify({
+                type: 'init',
+                token: this.control_token,
+                mode: 'conversation',
+                language: this.language,
+            }));
+            socket.onmessage = (event) => {
+                if (typeof event.data !== 'string') return;
+                let data;
+                try { data = JSON.parse(event.data); } catch { return; }
+                if (data.type === 'ready') {
+                    ready = true;
+                    clearTimeout(timeout);
+                    resolve();
+                    return;
+                }
+                if (data.type === 'state') {
+                    this.onState?.(data.state);
+                    return;
+                }
+                if (data.type === 'error') {
+                    if (!ready) {
+                        clearTimeout(timeout);
+                        socket.close();
+                        reject(new Error(data.message || 'Avatar conversation failed.'));
+                    } else if (!this.stopped) {
+                        this.onError?.(data.message || 'Avatar conversation error.');
+                    }
+                }
+            };
+            socket.onerror = () => {
+                if (!ready) {
+                    clearTimeout(timeout);
+                    reject(new Error('Avatar conversation connection failed.'));
+                }
+            };
+            socket.onclose = () => {
+                if (!ready) {
+                    clearTimeout(timeout);
+                    reject(new Error('Avatar conversation connection closed.'));
+                    return;
+                }
+                if (!this.stopped) this.onError?.('Voice session disconnected.');
+            };
+        });
     }
 
     connectAvatarStream() {
@@ -426,6 +496,10 @@ export class ConversationClient {
                 });
                 this.processor.port.onmessage = (event) => {
                     if (this.socket?.readyState !== WebSocket.OPEN) return;
+                    if (this.engineMode) {
+                        this.socket.send(event.data);
+                        return;
+                    }
                     this.socket.send(JSON.stringify({ user_audio_chunk: base64FromBytes(new Uint8Array(event.data)) }));
                 };
                 this.source.connect(this.processor);
@@ -439,7 +513,12 @@ export class ConversationClient {
         this.processor.onaudioprocess = (event) => {
             if (this.socket?.readyState !== WebSocket.OPEN) return;
             const samples = resample(event.inputBuffer.getChannelData(0), this.context.sampleRate, this.inputRate);
-            this.socket.send(JSON.stringify({ user_audio_chunk: base64FromBytes(floatToPcm16(samples)) }));
+            const pcm = floatToPcm16(samples);
+            if (this.engineMode) {
+                this.socket.send(pcm.buffer);
+                return;
+            }
+            this.socket.send(JSON.stringify({ user_audio_chunk: base64FromBytes(pcm) }));
         };
         this.source.connect(this.processor);
         this.processor.connect(this.context.destination);
@@ -451,11 +530,23 @@ export class ConversationClient {
     }
 
     sendText(text) {
+        if (this.engineMode) {
+            if (this.socket?.readyState === WebSocket.OPEN) {
+                this.socket.send(JSON.stringify({ type: 'user_message', text }));
+            }
+            return;
+        }
         this.interrupt();
         this.socket?.send(JSON.stringify({ type: 'user_message', text }));
     }
 
     interrupt() {
+        if (this.engineMode) {
+            if (this.socket?.readyState === WebSocket.OPEN) {
+                this.socket.send(JSON.stringify({ type: 'interrupt' }));
+            }
+            return;
+        }
         this.generation += 1;
         clearTimeout(this.avatarFlushTimer);
         this.avatarFlushTimer = null;
@@ -493,6 +584,14 @@ export class ConversationClient {
         this.processor?.disconnect();
         this.source?.disconnect();
         this.stream?.getTracks().forEach((track) => track.stop());
+        if (this.engineMode) {
+            if (this.socket?.readyState === WebSocket.OPEN) {
+                try { this.socket.send(JSON.stringify({ type: 'end' })); } catch {}
+            }
+            this.context?.close().catch(() => {});
+            this.socket?.close();
+            return;
+        }
         this.uploadAbortController?.abort();
         this.uploadAbortController = null;
         clearTimeout(this.avatarFlushTimer);

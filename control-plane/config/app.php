@@ -57,6 +57,13 @@ return [
     'only_embed' => (bool) env('ONLY_EMBED', false),
 
     /*
+    | When true the GPU engine opens the ElevenLabs ConvAI socket itself and the
+    | browser only streams its microphone — avatar audio never crosses the
+    | user's connection. Set to false to fall back to the legacy browser relay.
+    */
+    'engine_convai' => (bool) env('ENGINE_CONVAI', true),
+
+    /*
     |--------------------------------------------------------------------------
     | Application Timezone
     |--------------------------------------------------------------------------

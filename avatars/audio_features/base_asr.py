@@ -45,27 +45,59 @@ class BaseASR:
         #self.context_size = 10
         self.feat_queue = Queue(maxsize=2)
 
+        frame_ms = 1000 // (opt.fps * 2)  # 20ms
+        self.start_watermark_frames = getattr(opt, 'audio_start_watermark_ms', 0) // frame_ms
+        self.underrun_hold_seconds = getattr(opt, 'underrun_hold_ms', 0) / 1000.0
+        self._response_active = False
+        self._end_buffered = 0  # 'end' frames currently sitting in self.queue
+        self._hold_started = 0.0
+
         #self.warm_up()
 
     def flush_talk(self):
         self.queue.queue.clear()
+        self._response_active = False
+        self._end_buffered = 0
+        self._hold_started = 0.0
 
     def put_audio_frame(self,audio_chunk:NDArray[np.float32],datainfo:dict): #16khz 20ms pcm
         self.queue.put(AudioFrameData(data=audio_chunk,type=0,userdata=datainfo))
+        if datainfo.get('status') == 'end':
+            self._end_buffered += 1
 
     #return frame:audio pcm; type: 0-normal speak, 1-silence; eventpoint:custom event sync with audio
-    def get_audio_frame(self)->AudioFrameData:        
+    def get_audio_frame(self)->AudioFrameData:
         try:
             if self.parent and self.parent.custom_audiotype>1: #播放自定义音频,优先播放完自定义动作,可以通过interrupt打断动作播放
                 frame = self.parent.get_custom_audio_stream(self.parent.custom_audiotype)
                 type = self.parent.custom_audiotype
                 return AudioFrameData(data=frame, type=type, userdata={})
-            else:
-                frame = self.queue.get(block=True,timeout=0.01)
-                return frame
+            # 起播水位线：整段语音尚未开播时，先攒够缓冲（或段尾已入队）再放行
+            if (not self._response_active and self.start_watermark_frames > 0
+                    and 0 < self.queue.qsize() < self.start_watermark_frames
+                    and self._end_buffered == 0):
+                return AudioFrameData(data=np.zeros(self.chunk, dtype=np.float32),
+                                      type=1, userdata={})
+            frame = self.queue.get(block=True,timeout=0.01)
+            status = frame.userdata.get('status') if frame.userdata else None
+            if status == 'start':
+                self._response_active = True
+            elif status == 'end':
+                self._response_active = False
+                self._end_buffered -= 1
+            self._hold_started = 0.0
+            return frame
             #print(f'[INFO] get frame {frame.shape}')
         except queue.Empty:
             frame = np.zeros(self.chunk, dtype=np.float32)
+            # 语音中途断流：在时限内保持最后口型，避免 10ms 空档就切回静音帧
+            if self._response_active and self.underrun_hold_seconds > 0:
+                now = time.monotonic()
+                if self._hold_started == 0.0:
+                    self._hold_started = now
+                if now - self._hold_started < self.underrun_hold_seconds:
+                    return AudioFrameData(data=frame, type=1, userdata={'hold': True})
+                self._response_active = False
             return AudioFrameData(data=frame, type=1, userdata={})
 
 

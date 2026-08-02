@@ -119,6 +119,10 @@ def parse_args():
     parser.add_argument('--max_session', type=int, default=5)
     parser.add_argument('--listenport', type=int, default=8010,
                         help="web listen port")
+    parser.add_argument('--audio_start_watermark_ms', type=int, default=0,
+                        help="等待缓冲达到该毫秒数后才开始播放一段语音（0=关闭）")
+    parser.add_argument('--underrun_hold_ms', type=int, default=0,
+                        help="语音中断时保持最后口型的最长毫秒数，超时后回到静音（0=关闭）")
 
     # ─── 虚拟摄像头 ───────────────────────────────────────────────────
     parser.add_argument('--audio_output_device', type=int, default=None,

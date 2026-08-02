@@ -68,6 +68,7 @@ class BaseAvatar:
         self.sessionid = self.opt.sessionid
 
         self.speaking = False
+        self._last_speaking_frame = None
         self.recording = False
         self._record_video_pipe = None
         self._record_audio_pipe = None
@@ -381,32 +382,31 @@ class BaseAvatar:
         logger.info('baseavatar inference thread stop')
 
     def process_frames(self,quit_event):
-        enable_transition = False  # 设置为False禁用过渡效果，True启用
-        
         _last_speaking = False
-        _transition_start = time.time()
-        if enable_transition:
-            _transition_duration = 0.1  # 过渡时间
-            _last_silent_frame = None  # 静音帧缓存
-            _last_speaking_frame = None  # 说话帧缓存
 
         self.output.start()
-        
+
         while not quit_event.is_set():
             try:
                 audio_frames: list[AudioFrameData]
                 res_frame,audio_frames,idx = self.res_frame_queue.get(block=True, timeout=1)
             except queue.Empty:
                 continue
-            
+
+            all_silence = audio_frames[0].type!=0 and audio_frames[1].type!=0
+            # 语音中途断流的补帧：保持最后口型，不切回静音帧
+            is_hold = all_silence and audio_frames[0].type == 1 and self._last_speaking_frame is not None and any(
+                bool(f.userdata) and f.userdata.get('hold') for f in audio_frames)
+
             # 检测状态变化
-            current_speaking = not (audio_frames[0].type!=0 and audio_frames[1].type!=0)
+            current_speaking = (not all_silence) or is_hold
             if current_speaking != _last_speaking:
                 logger.info(f"状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
-                _transition_start = time.time()
             _last_speaking = current_speaking
 
-            if audio_frames[0].type!=0 and audio_frames[1].type!=0: #全为静音数据，只需要取fullimg
+            if is_hold:
+                combine_frame = self._last_speaking_frame
+            elif all_silence: #全为静音数据，只需要取fullimg
                 self.speaking = False
                 audiotype = audio_frames[0].type
                 if self.custom_index.get(audiotype) is not None: #有自定义视频
@@ -415,18 +415,7 @@ class BaseAvatar:
                     self.custom_index[audiotype] += 1
                 else:
                     target_frame = self.frame_list_cycle[idx]
-                
-                if enable_transition:
-                    # 说话→静音过渡
-                    if time.time() - _transition_start < _transition_duration and _last_speaking_frame is not None:
-                        alpha = min(1.0, (time.time() - _transition_start) / _transition_duration)
-                        combine_frame = cv2.addWeighted(_last_speaking_frame, 1-alpha, target_frame, alpha, 0)
-                    else:
-                        combine_frame = target_frame
-                    # 缓存静音帧
-                    _last_silent_frame = combine_frame.copy()
-                else:
-                    combine_frame = target_frame
+                combine_frame = target_frame
             else:
                 self.speaking = True
                 try:
@@ -434,17 +423,8 @@ class BaseAvatar:
                 except Exception as e:
                     logger.warning(f"paste_back_frame error: {e}")
                     continue
-                if enable_transition:
-                    # 静音→说话过渡
-                    if time.time() - _transition_start < _transition_duration and _last_silent_frame is not None:
-                        alpha = min(1.0, (time.time() - _transition_start) / _transition_duration)
-                        combine_frame = cv2.addWeighted(_last_silent_frame, 1-alpha, current_frame, alpha, 0)
-                    else:
-                        combine_frame = current_frame
-                    # 缓存说话帧
-                    _last_speaking_frame = combine_frame.copy()
-                else:
-                    combine_frame = current_frame
+                combine_frame = current_frame
+                self._last_speaking_frame = current_frame
 
             # 使用统一输出接口推送视频帧
             self.output.push_video_frame(combine_frame)
