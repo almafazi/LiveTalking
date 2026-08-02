@@ -132,6 +132,61 @@ class ResponseFramer:
         self.remainder = bytearray()
 
 
+class TurnTimer:
+    """Per-giliran: catat tiap tahap dari user selesai bicara sampai avatar
+    benar-benar terdengar, lalu keluarkan satu baris ringkasan yang greppable.
+
+    grep 'LATENCY' livetalking.log
+    """
+
+    def __init__(self, generation: int, trigger: str):
+        self.generation = generation
+        self.trigger = trigger          # 'voice' | 'text' | 'greeting'
+        self.t_start = time.monotonic()  # user turn selesai (transcript/kirim teks)
+        # catatan: event teks lengkap sering tiba SETELAH audio pertama —
+        # jadi agent_text_ms bukan "waktu LLM", pakai tts_first_ms untuk itu
+        self.t_agent_text = None
+        self.t_first_audio = None        # byte TTS pertama tiba di engine
+        self.t_ingest_done = None        # seluruh audio jawaban sudah masuk
+        self.t_playout_start = None      # frame pertama benar-benar dikirim ke WebRTC
+        self.samples = 0
+        self.summarized = False
+
+    def _ms(self, value):
+        return "-" if value is None else f"{(value - self.t_start) * 1000:.0f}"
+
+    def log_playout_start(self):
+        self.t_playout_start = time.monotonic()
+        logger.info(
+            "LATENCY turn gen=%s trigger=%s agent_text_ms=%s tts_first_ms=%s "
+            "playout_ms=%s pipeline_ms=%s",
+            self.generation, self.trigger,
+            self._ms(self.t_agent_text), self._ms(self.t_first_audio),
+            self._ms(self.t_playout_start),
+            "-" if self.t_first_audio is None
+            else f"{(self.t_playout_start - self.t_first_audio) * 1000:.0f}",
+        )
+
+    def log_summary(self, reason: str):
+        if self.summarized:
+            return
+        self.summarized = True
+        audio_seconds = self.samples / 16000.0
+        ingest_span = (
+            (self.t_ingest_done - self.t_first_audio)
+            if self.t_first_audio and self.t_ingest_done else 0.0
+        )
+        rate = f"{audio_seconds / ingest_span:.1f}" if ingest_span > 0.01 else "-"
+        logger.info(
+            "LATENCY summary gen=%s trigger=%s reason=%s audio_s=%.1f "
+            "ingest_rate=%sx agent_text_ms=%s tts_first_ms=%s playout_ms=%s total_ms=%s",
+            self.generation, self.trigger, reason, audio_seconds, rate,
+            self._ms(self.t_agent_text), self._ms(self.t_first_audio),
+            self._ms(self.t_playout_start),
+            f"{(time.monotonic() - self.t_start) * 1000:.0f}",
+        )
+
+
 class ConvAIRelay:
     def __init__(self, browser_ws, avatar_session, control, language: str):
         self.browser_ws = browser_ws
@@ -146,6 +201,7 @@ class ConvAIRelay:
         self.response_active = False
         self.last_audio = 0.0
         self.closed = False
+        self.turn = None
 
     async def start(self):
         signed_url = await fetch_signed_url()
@@ -238,9 +294,15 @@ class ConvAIRelay:
         await self.barge_in()
         if self.upstream is not None and not self.upstream.closed:
             await self.upstream.send_json({"type": "user_message", "text": text})
+        self.turn = TurnTimer(self.control["generation"], "text")
+        logger.info("LATENCY turn-start gen=%s trigger=text chars=%s",
+                    self.control["generation"], len(text))
         await self._send_browser({"type": "state", "state": "thinking"})
 
     async def barge_in(self):
+        if self.turn is not None:
+            self.turn.log_summary("interrupted")
+            self.turn = None
         self.control["generation"] += 1
         if self.framer is not None:
             self.framer.abort()
@@ -255,6 +317,9 @@ class ConvAIRelay:
     def _finish_response(self):
         if self.framer is not None:
             self.framer.finish()
+            if self.turn is not None:
+                self.turn.t_ingest_done = time.monotonic()
+                self.turn.samples = self.framer.payload_bytes // 2
         self.response_active = False
 
     async def _upstream_reader(self):
@@ -278,12 +343,17 @@ class ConvAIRelay:
                     await self._handle_audio(data)
                 elif event_type == "agent_response":
                     text = (data.get("agent_response_event") or {}).get("agent_response", "")
+                    if self.turn is not None and self.turn.t_agent_text is None:
+                        self.turn.t_agent_text = time.monotonic()
                     await self._send_browser({"type": "agent_response", "text": text})
                 elif event_type == "user_transcript":
                     # 用户开口即打断：显式 interruption 事件迟到/缺失时的兜底
                     if self.response_active:
                         await self.barge_in()
                     text = (data.get("user_transcription_event") or {}).get("user_transcript", "")
+                    self.turn = TurnTimer(self.control["generation"], "voice")
+                    logger.info("LATENCY turn-start gen=%s trigger=voice chars=%s",
+                                self.control["generation"], len(text))
                     await self._send_browser({"type": "user_transcript", "text": text})
                     await self._send_browser({"type": "state", "state": "thinking"})
                 elif event_type == "interruption":
@@ -318,6 +388,11 @@ class ConvAIRelay:
         if not self.response_active:
             self.framer = ResponseFramer(self.avatar_session, self.control["generation"])
             self.response_active = True
+            if self.turn is None:
+                # sapaan pembuka: tidak ada user_transcript, ukur dari audio pertama
+                self.turn = TurnTimer(self.control["generation"], "greeting")
+            if self.turn.t_first_audio is None:
+                self.turn.t_first_audio = time.monotonic()
             await self._send_browser({"type": "state", "state": "speaking"})
         elif self.framer.generation != self.control["generation"]:
             return  # 打断后的残余音频
@@ -344,8 +419,13 @@ class ConvAIRelay:
                 continue
             status = eventpoint.get("status")
             if status == "start":
+                if self.turn is not None and self.turn.t_playout_start is None:
+                    self.turn.log_playout_start()
                 await self._send_browser({"type": "state", "state": "speaking"})
             elif status == "end":
+                if self.turn is not None:
+                    self.turn.log_summary("completed")
+                    self.turn = None
                 await self._send_browser({"type": "state", "state": "listening"})
 
     async def _watchdog(self):
@@ -391,6 +471,9 @@ class ConvAIRelay:
                 await self.browser_ws.close()
             except (ConnectionResetError, RuntimeError):
                 pass
+        if self.turn is not None:
+            self.turn.log_summary("relay_closed")
+            self.turn = None
         logger.info("ConvAI relay closed session=%s reason=%s",
                     self.control.get("sessionid"), reason)
 
